@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Data & checkpoints (too large for git)
+s2_data/
+*.npy
+*.pth
+*.pt
+*.ckpt
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code internal
+.claude/
+
+# Logs
+*.log
+*.csv
+wandb/
