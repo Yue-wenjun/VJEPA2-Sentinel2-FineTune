@@ -63,6 +63,7 @@ class Sentinel2Dataset(Dataset):
     def __init__(
         self,
         sequences_csv: str,
+        base_dir: str = "",
         frames_per_clip: int = 8,
         random_clip: bool = True,
         crop_size: int = 224,
@@ -75,11 +76,13 @@ class Sentinel2Dataset(Dataset):
         self.crop_size = crop_size
         self.random_flip = random_flip
         self.normalize = normalize
+        # CSV stores relative paths; base_dir (or sequences_csv's parent) resolves them
+        _base = Path(base_dir) if base_dir else Path(sequences_csv).parent
 
         df = pd.read_csv(sequences_csv)
         self.sequences = []
         for _, row in df.iterrows():
-            paths = row["frame_paths"].split(",")
+            paths = [str(_base / p) for p in row["frame_paths"].split(",")]
             doys  = list(map(int, str(row["doys"]).split(",")))
             # Per-frame cloud filter for ablation experiments
             if "cloud_fracs" in df.columns:
@@ -154,6 +157,7 @@ class Sentinel2Dataset(Dataset):
 def make_sentinel2_dataloader(
     sequences_csv: str,
     batch_size: int,
+    base_dir: str = "",
     frames_per_clip: int = 8,
     crop_size: int = 224,
     rank: int = 0,
@@ -165,6 +169,7 @@ def make_sentinel2_dataloader(
 ):
     dataset = Sentinel2Dataset(
         sequences_csv=sequences_csv,
+        base_dir=base_dir,
         frames_per_clip=frames_per_clip,
         crop_size=crop_size,
     )

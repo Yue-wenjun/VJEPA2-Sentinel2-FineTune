@@ -15,15 +15,15 @@ Pipeline:
 import argparse
 import copy
 import logging
-import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import yaml
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vjepa2"))
+sys.path.insert(0, str(Path(__file__).parent / "vjepa2"))
 
 import app.vjepa_2_1.models.predictor as vit_pred
 import app.vjepa_2_1.models.vision_transformer as video_vit
@@ -294,8 +294,8 @@ def main():
     cfg = load_config(args.config)
     device = torch.device(args.device)
     dtype = torch.bfloat16 if cfg["meta"].get("dtype") == "bfloat16" else torch.float32
-    folder = cfg["folder"]
-    os.makedirs(folder, exist_ok=True)
+    folder = Path(cfg["folder"])
+    folder.mkdir(parents=True, exist_ok=True)
 
     seed = cfg["meta"].get("seed", 42)
     torch.manual_seed(seed)
@@ -308,6 +308,7 @@ def main():
     # ── dataset + collator ────────────────────────────────────────────────────
     dataset = Sentinel2Dataset(
         sequences_csv=s2_cfg["sequences_csv"],
+        base_dir=s2_cfg.get("base_dir", ""),
         frames_per_clip=d_cfg["frames_per_clip"],
         crop_size=d_cfg["crop_size"],
         max_cloud_frac=s2_cfg.get("max_cloud_frac", 0.30),
@@ -372,13 +373,13 @@ def main():
             if global_epoch % save_freq == 0:
                 save_checkpoint(
                     encoder, predictor, optimizer, global_epoch,
-                    os.path.join(folder, f"checkpoint_ep{global_epoch:04d}.pth"),
+                    folder / f"checkpoint_ep{global_epoch:04d}.pth",
                 )
             global_epoch += 1
 
     save_checkpoint(
         encoder, predictor, optimizer, global_epoch,
-        os.path.join(folder, "checkpoint_final.pth"),
+        folder / "checkpoint_final.pth",
     )
     log.info("Fine-tuning complete.")
 

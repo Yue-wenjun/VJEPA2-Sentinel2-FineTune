@@ -9,6 +9,9 @@ folder: /your_folder/finetune_s2/vitl.224px.8f
 # ── Sentinel-2 data ──────────────────────────────────────────────────────────
 sentinel2:
   sequences_csv: /your_data/s2_data/sequences.csv
+  # base_dir: parent directory of the s2_data/ folder. Leave empty to use
+  # sequences_csv's parent directory (works when data is next to the CSV).
+  base_dir: ""
   pretrained_checkpoint: /your_checkpoints/vjepa2_vitl.pth
   # Bands in order stored in .npy files: B02 B03 B04 B08 B11 B12
   in_chans: 6

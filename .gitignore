@@ -6,9 +6,13 @@ __pycache__/
 dist/
 build/
 
-# Data & checkpoints (too large for git)
-s2_data/
-*.npy
+# Data -- never commit large binary datasets
+s2_data/           # Sentinel-2 patches downloaded by download_s2.py
+*.npy              # safety net for stray numpy arrays outside s2_data/
+*.csv              # index.csv / sequences.csv are data-derived, not source
+
+# Model weights & checkpoints
+pretrained/        # V-JEPA 2.1 pretrained weights downloaded at runtime
 *.pth
 *.pt
 *.ckpt
@@ -20,7 +24,6 @@ s2_data/
 # Claude Code internal
 .claude/
 
-# Logs
+# Logs / experiment tracking
 *.log
-*.csv
 wandb/

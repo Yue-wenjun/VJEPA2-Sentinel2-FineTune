@@ -223,16 +223,20 @@ def download_patches(
                         continue
 
                 if len(frame_paths) >= min_valid_frames:
+                    # Store POSIX-style relative paths so the CSV is portable across OS
+                    rel_paths = [
+                        Path(fp).relative_to(out_dir).as_posix() for fp in frame_paths
+                    ]
                     all_sequence_rows.append({
                         "patch_key": patch_key,
-                        "frame_paths": ",".join(frame_paths),
+                        "frame_paths": ",".join(rel_paths),
                         "doys": ",".join(map(str, frame_doys)),
                         "cloud_fracs": ",".join(f"{c:.4f}" for c in frame_cloud_fracs),
                         "n_frames": len(frame_paths),
                     })
-                    for fp, doy, cf in zip(frame_paths, frame_doys, frame_cloud_fracs):
+                    for rp, doy, cf in zip(rel_paths, frame_doys, frame_cloud_fracs):
                         all_frame_rows.append({
-                            "path": fp, "doy": doy,
+                            "path": rp, "doy": doy,
                             "cloud_frac": cf, "patch_key": patch_key,
                         })
 
