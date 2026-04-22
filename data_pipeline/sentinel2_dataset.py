@@ -5,7 +5,7 @@ Drop-in replacement for VideoDataset:
   - Reads .npy patch files saved by download_s2.py  [H, W, 6]
   - Assembles temporal sequences                    [T, H, W, 6]
   - Injects DOY encoding as additive positional signal
-  - Returns same (buffer, label, clip_indices) tuple as VideoDataset
+  - Returns ([buffer], label, clip_indices, doy_tensor) — same as VideoDataset plus doy_tensor
 
 Band order in saved .npy files: B02 B03 B04 B08 B11 B12
 Band statistics (per-band mean/std over S2 L2A corpus, reflectance 0-1):
@@ -25,7 +25,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 # Per-band normalization stats (reflectance space, 6 bands)
@@ -66,16 +65,22 @@ class Sentinel2Dataset(Dataset):
         base_dir: str = "",
         frames_per_clip: int = 8,
         random_clip: bool = True,
-        crop_size: int = 224,
+        crop_size: int = 384,
         random_flip: bool = True,
         normalize: bool = True,
-        max_cloud_frac: float = 1.0,
+        cloud_cats: list | None = None,
     ):
+        """
+        cloud_cats: list of allowed cloud categories (0=clean, 1=moderate, 2=cloudy, -1=SCL unavailable).
+                    None = no filter (use all frames including cat=-1).
+                    Example: [0] = only clean frames, [0,1] = clean+moderate (excludes cloudy and SCL-unknown).
+        """
         self.frames_per_clip = frames_per_clip
         self.random_clip = random_clip
         self.crop_size = crop_size
         self.random_flip = random_flip
         self.normalize = normalize
+        _allowed = set(cloud_cats) if cloud_cats is not None else None  # None = no filter
         # CSV stores relative paths; base_dir (or sequences_csv's parent) resolves them
         _base = Path(base_dir) if base_dir else Path(sequences_csv).parent
 
@@ -84,10 +89,9 @@ class Sentinel2Dataset(Dataset):
         for _, row in df.iterrows():
             paths = [str(_base / p) for p in row["frame_paths"].split(",")]
             doys  = list(map(int, str(row["doys"]).split(",")))
-            # Per-frame cloud filter for ablation experiments
-            if "cloud_fracs" in df.columns:
-                cfs = list(map(float, str(row["cloud_fracs"]).split(",")))
-                valid = [(p, d) for p, d, c in zip(paths, doys, cfs) if c <= max_cloud_frac]
+            if _allowed is not None and "cloud_cats" in df.columns:
+                cats = list(map(int, str(row["cloud_cats"]).split(",")))
+                valid = [(p, d) for p, d, c in zip(paths, doys, cats) if c in _allowed]
                 if not valid:
                     continue
                 paths, doys = zip(*valid)
@@ -158,8 +162,9 @@ def make_sentinel2_dataloader(
     sequences_csv: str,
     batch_size: int,
     base_dir: str = "",
+    cloud_cats: list | None = None,
     frames_per_clip: int = 8,
-    crop_size: int = 224,
+    crop_size: int = 384,
     rank: int = 0,
     world_size: int = 1,
     num_workers: int = 4,
@@ -170,6 +175,7 @@ def make_sentinel2_dataloader(
     dataset = Sentinel2Dataset(
         sequences_csv=sequences_csv,
         base_dir=base_dir,
+        cloud_cats=cloud_cats,
         frames_per_clip=frames_per_clip,
         crop_size=crop_size,
     )

@@ -2,7 +2,7 @@
 V-JEPA 2.1 × Sentinel-2 Fine-Tuning Entry Point
 
 Usage:
-    python finetune_main.py --config vjepa2/configs/finetune/vitl16/sentinel2-224px-8f.yaml
+    python finetune_main.py --config vjepa2/configs/finetune/vitl16/sentinel2-384px-8f.yaml
 
 Pipeline:
   1. Sentinel2Dataset yields ([buffer], label, clip_indices, doy_tensor)
@@ -309,9 +309,9 @@ def main():
     dataset = Sentinel2Dataset(
         sequences_csv=s2_cfg["sequences_csv"],
         base_dir=s2_cfg.get("base_dir", ""),
+        cloud_cats=s2_cfg.get("cloud_cats", None),
         frames_per_clip=d_cfg["frames_per_clip"],
         crop_size=d_cfg["crop_size"],
-        max_cloud_frac=s2_cfg.get("max_cloud_frac", 0.30),
     )
     log.info(f"Dataset: {len(dataset)} sequences")
 

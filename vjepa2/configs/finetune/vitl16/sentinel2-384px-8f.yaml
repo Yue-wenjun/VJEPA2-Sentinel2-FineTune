@@ -4,7 +4,7 @@ app: vjepa_2_1_sentinel2
 nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
-folder: /your_folder/finetune_s2/vitl.224px.8f
+folder: /your_folder/finetune_s2/vitl.384px.8f
 
 # ── Sentinel-2 data ──────────────────────────────────────────────────────────
 sentinel2:
@@ -15,16 +15,15 @@ sentinel2:
   pretrained_checkpoint: /your_checkpoints/vjepa2_vitl.pth
   # Bands in order stored in .npy files: B02 B03 B04 B08 B11 B12
   in_chans: 6
-  # Cloud ablation group. Options:
-  #   A: 0.10  (clean baseline)
-  #   B: 0.30  (default)
-  #   C: 1.00  (all frames, no filter)
-  max_cloud_frac: 0.30
+  # Cloud category filter. 0=clean(<10%), 1=moderate(<30%), 2=cloudy(>=30%)
+  # null = no filter (all frames). See data_pipeline/cloud_ablation.py for all groups.
+  #   Group A: [0]      Group B: [0,1]     Group C/D: null     Group E: [0,1]
+  cloud_cats: [0, 1]
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 data:
-  batch_size: 16
-  crop_size: 224
+  batch_size: 8              # 384px → ~3× more tokens than 224px; reduce batch to fit A100
+  crop_size: 384             # matches ViT-L/16 pretraining resolution
   patch_size: 16
   frames_per_clip: 8         # T: number of S2 acquisitions per training sample
   tubelet_size: 2            # must match pretrained model
