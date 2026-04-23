@@ -1,5 +1,34 @@
 # 变更日志
 
+## 2026-04-23
+
+### sample_patches.py 运行记录 — 第一轮全类采样
+
+**命令**：`python sample_patches.py --proxy`（22 个 bbox，`candidate_stride=768`，`min_per_class=3000`）
+
+```
+Stratified selection (min_per_class=3000):
+LULC  10 (trees       ): target=6600  available=  4327  selected=4327
+LULC  20 (shrubland   ): target=3000  available=   413  selected= 413
+LULC  30 (grassland   ): target=3960  available=  1279  selected=1279
+LULC  40 (cropland    ): target=6600  available=  2432  selected=2432
+LULC  50 (built_up    ): target=3300  available=   117  selected= 117
+LULC  60 (barren      ): target=3000  available=  2400  selected=2400
+LULC  70 (snow_ice    ): target=3000  available=   788  selected= 788
+LULC  80 (water       ): target=3000  available=  1510  selected=1510
+LULC  90 (wetland     ): target=3000  available=   258  selected= 258
+LULC  95 (mangrove    ): target=3000  available=    72  selected=  72
+LULC 100 (moss_lichen ): target=3000  available=   124  selected= 124
+
+Total selected: 13720 patches  →  selected_patches.csv
+```
+
+**分析**：候选池严重不足，稀有类（mangrove/built_up/moss_lichen/wetland/shrubland/snow_ice）全部低于 1000。根因是每个 bbox 仅 0.5°×0.5°，`stride=768` 下每 tile 候选 patch 数约 30-50。
+
+**后续行动**：新建 `sample_patches_rare.py`，对 6 个稀有类（< 1000）各准备 4 个全新 2°×2° bbox，输出 `selected_patches_rare.csv`，最终合并两个 CSV。
+
+---
+
 ## 2026-04-22
 
 ### 代码复核：修复 8 个 Bug
