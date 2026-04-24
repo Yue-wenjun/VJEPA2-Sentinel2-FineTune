@@ -17,11 +17,12 @@ Pitfall checklist:
 Output layout:
     <out_dir>/
         patches/
-            <tile_id>_<row>_<col>/
-                <YYYY-MM-DD>.npy        # float32 [H, W, 6]  (bands: B02 B03 B04 B08 B11 B12)
-                <YYYY-MM-DD>.meta.npy   # scalar float32: cloud_frac (-1.0 if SCL unavailable)
-        index.csv      # path, doy, cloud_frac, cloud_cat, patch_key -- one row per frame
-        sequences.csv  # patch_key, frame_paths, doys, cloud_fracs, cloud_cats, n_frames
+            <tile_id>_<row>_<col>.h5   # uint16 [N, H, W, 6] gzip-4; datasets: frames/doys/cloud_fracs/cloud_cats
+        index.csv      # patch_key, h5_path, frame_idx, doy, cloud_frac, cloud_cat -- one row per frame
+        sequences.csv  # patch_key, h5_path, doys, cloud_fracs, cloud_cats, n_frames
+
+Storage: uint16 (DN*10000) + gzip-4 ≈ 6-8× smaller than float32 .npy.
+Resume: patches with an existing .h5 file are skipped.
 
 Usage:
     pip install pystac-client planetary-computer rioxarray rasterio scipy tqdm tenacity pandas
@@ -45,6 +46,26 @@ os.environ.setdefault("GDAL_HTTP_RETRY_DELAY", "2")
 # Disable slow directory scans on vsicurl; speeds up repeated COG opens.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
 
+# --- proxy -------------------------------------------------------------------
+
+_PROXY_HTTP  = "http://127.0.0.1:33210"
+_PROXY_SOCKS = "socks5://127.0.0.1:33211"
+
+def configure_proxy() -> None:
+    """Set HTTP/SOCKS proxy env vars for requests, urllib3, and GDAL COG reads.
+
+    GDAL uses SOCKS5 (not HTTP proxy) to avoid Windows schannel TLS failures
+    that occur when GDAL tries to do a TLS handshake inside an HTTP CONNECT tunnel.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    os.environ["HTTP_PROXY"]      = _PROXY_HTTP
+    os.environ["HTTPS_PROXY"]     = _PROXY_HTTP
+    os.environ["ALL_PROXY"]       = _PROXY_SOCKS
+    os.environ["GDAL_HTTP_PROXY"] = _PROXY_SOCKS   # SOCKS5: transparent TCP, no TLS interception
+    _log.info(f"Proxy: requests → {_PROXY_HTTP}  GDAL/vsicurl → {_PROXY_SOCKS}")
+
+import h5py
 import numpy as np
 import planetary_computer
 import pystac_client
@@ -146,33 +167,27 @@ def download_patches(
     patches_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- query STAC ----------------------------------------------------------
-    catalog = pystac_client.Client.open(
-        PLANETARY_COMPUTER_URL,
-        modifier=planetary_computer.sign_inplace,
-    )
-    search = catalog.search(
+    catalog = pystac_client.Client.open(PLANETARY_COMPUTER_URL)
+    items = list(catalog.search(
         collections=[COLLECTION],
         bbox=bbox,
         datetime=f"{start_date}/{end_date}",
-        query={"eo:cloud_cover": {"lt": 80}},   # coarse pre-filter; patch-level below
-    )
-    items = list(search.items())
+        query={"eo:cloud_cover": {"lt": 80}},
+    ).items())
     log.info(f"Found {len(items)} S2 scenes for bbox={bbox}")
     if not items:
         log.warning("No scenes found. Check bbox / date range.")
         return
 
-    # ---- group by MGRS tile so we only sample patches within one tile --------
     from collections import defaultdict
     by_tile = defaultdict(list)
     for item in items:
         tile_id = item.properties.get("s2:mgrs_tile", item.id[:5])
         by_tile[tile_id].append(item)
 
-    # When patch_list is provided, skip tiles not in the list
     if patch_list is not None:
         by_tile = {tid: v for tid, v in by_tile.items() if tid in patch_list}
-        log.info(f"patch_list active: downloading {len(by_tile)} tile(s), "
+        log.info(f"patch_list: {len(by_tile)} tile(s), "
                  f"{sum(len(v) for v in patch_list.values())} patch(es)")
 
     all_sequence_rows = []
@@ -185,9 +200,8 @@ def download_patches(
         tile_h, tile_w = _probe_tile(tile_items[0])
         log.info(f"  Tile size: {tile_h} × {tile_w} px (10m)")
 
-        # Build patch grid: either full uniform grid or the provided patch_list
         if patch_list is not None:
-            patch_coords = patch_list[tile_id]            # [(px_row, px_col), ...]
+            patch_coords = patch_list[tile_id]
             log.info(f"  Using {len(patch_coords)} selected patches")
         else:
             rows = list(range(border_px, tile_h - border_px - patch_size, stride))
@@ -197,91 +211,108 @@ def download_patches(
 
         for pr, pc in patch_coords:
             patch_key = f"{tile_id}_r{pr:05d}_c{pc:05d}"
-            patch_out = patches_dir / patch_key
-            patch_out.mkdir(exist_ok=True)
+            h5_file   = patches_dir / f"{patch_key}.h5"
 
-            frame_paths = []
-            frame_doys = []
+            # Resume: skip patches that already have a complete .h5
+            if h5_file.exists():
+                log.info(f"  Skip {patch_key} (h5 exists)")
+                try:
+                    with h5py.File(h5_file, "r") as hf:
+                        n = hf["frames"].shape[0]
+                        doys = hf["doys"][:].tolist()
+                        cfs  = hf["cloud_fracs"][:].tolist()
+                        ccs  = hf["cloud_cats"][:].tolist()
+                    rel = h5_file.relative_to(out_dir).as_posix()
+                    all_sequence_rows.append({
+                        "patch_key": patch_key, "h5_path": rel,
+                        "doys": ",".join(map(str, doys)),
+                        "cloud_fracs": ",".join(f"{c:.4f}" for c in cfs),
+                        "cloud_cats": ",".join(map(str, ccs)),
+                        "n_frames": n,
+                    })
+                    for idx, (d, cf, cc) in enumerate(zip(doys, cfs, ccs)):
+                        all_frame_rows.append({
+                            "patch_key": patch_key, "h5_path": rel,
+                            "frame_idx": idx, "doy": d,
+                            "cloud_frac": cf, "cloud_cat": cc,
+                        })
+                except Exception as e:
+                    log.warning(f"  Could not read existing h5 {patch_key}: {e}")
+                continue
+
+            frame_stacks      = []
+            frame_doys        = []
             frame_cloud_fracs = []
-            frame_cloud_cats = []
+            frame_cloud_cats  = []
+            scl_size = math.ceil(patch_size / 2)
 
             for item in tqdm(tile_items, desc=patch_key, leave=False):
                 date_str = item.datetime.strftime("%Y-%m-%d")
-                out_npy = patch_out / f"{date_str}.npy"
-                out_meta = patch_out / f"{date_str}.meta.npy"
 
-                if out_npy.exists() and out_meta.exists():
-                    doy = item.datetime.timetuple().tm_yday
-                    cf = float(np.load(out_meta))
-                    frame_paths.append(str(out_npy))
-                    frame_doys.append(doy)
-                    frame_cloud_fracs.append(cf)
-                    frame_cloud_cats.append(_cloud_category(cf) if cf >= 0 else -1)
-                    continue
-
-                # --- Step 1: SCL cloud classification (non-fatal if unavailable) ---
+                # Step 1: SCL cloud classification (non-fatal)
                 cf = -1.0
-                cloud_cat = -1  # -1 = SCL unavailable (e.g. N0500+ baseline format)
-                scl_size = math.ceil(patch_size / 2)
+                cloud_cat = -1
                 try:
                     scl_patch = _read_patch(
-                        item, SCL_BAND,
-                        pr // 2, pc // 2, scl_size, scl_size
+                        item, SCL_BAND, pr // 2, pc // 2, scl_size, scl_size
                     ).astype(np.uint8)
                     cf = _cloud_fraction(scl_patch)
                     cloud_cat = _cloud_category(cf)
                 except Exception as e:
                     log.warning(f"  SCL unavailable {date_str} {patch_key}: {e}")
 
-                # --- Step 2: spectral bands (fatal if unavailable) ---
+                # Step 2: spectral bands (fatal if unavailable)
                 try:
-                    band_arrays = []
-                    for band in BANDS_10M:
-                        arr = _read_patch(item, band, pr, pc, patch_size, patch_size)
-                        band_arrays.append(arr)
-
-                    for band in BANDS_20M:
-                        arr = _read_patch(
-                            item, band,
-                            pr // 2, pc // 2,
-                            scl_size, patch_size,
-                        )
-                        band_arrays.append(arr)
-
-                    stack = np.stack(band_arrays, axis=-1)
-                    stack = np.clip(stack, 0, S2_SCALE) / S2_SCALE
-                    stack = stack.astype(np.float32)
-
-                    np.save(out_npy, stack)
-                    np.save(out_meta, np.float32(cf))
-                    doy = item.datetime.timetuple().tm_yday
-                    frame_paths.append(str(out_npy))
-                    frame_doys.append(doy)
+                    band_arrays = [
+                        _read_patch(item, b, pr, pc, patch_size, patch_size)
+                        for b in BANDS_10M
+                    ]
+                    band_arrays += [
+                        _read_patch(item, b, pr // 2, pc // 2, scl_size, patch_size)
+                        for b in BANDS_20M
+                    ]
+                    stack = np.clip(np.stack(band_arrays, axis=-1), 0, S2_SCALE) / S2_SCALE
+                    frame_stacks.append(stack.astype(np.float32))
+                    frame_doys.append(item.datetime.timetuple().tm_yday)
                     frame_cloud_fracs.append(cf)
                     frame_cloud_cats.append(cloud_cat)
-
                 except Exception as e:
                     log.warning(f"  Failed bands {date_str} {patch_key}: {e}")
-                    continue
 
-            if len(frame_paths) >= min_valid_frames:
-                # Store POSIX-style relative paths so the CSV is portable across OS
-                rel_paths = [
-                    Path(fp).relative_to(out_dir).as_posix() for fp in frame_paths
-                ]
-                all_sequence_rows.append({
-                    "patch_key": patch_key,
-                    "frame_paths": ",".join(rel_paths),
-                    "doys": ",".join(map(str, frame_doys)),
-                    "cloud_fracs": ",".join(f"{c:.4f}" for c in frame_cloud_fracs),
-                    "cloud_cats": ",".join(map(str, frame_cloud_cats)),
-                    "n_frames": len(frame_paths),
+            if len(frame_stacks) < min_valid_frames:
+                continue
+
+            # Write per-patch HDF5: uint16 + gzip-4, chunk = 1 frame
+            frames_arr = np.stack(frame_stacks, axis=0)           # [N, H, W, 6] float32
+            frames_u16 = (frames_arr * 10000).clip(0, 10000).astype(np.uint16)
+            n, h, w, c = frames_u16.shape
+            with h5py.File(h5_file, "w") as hf:
+                hf.create_dataset("frames", data=frames_u16,
+                                  compression="gzip", compression_opts=4,
+                                  chunks=(1, h, w, c))
+                hf.create_dataset("doys",
+                                  data=np.array(frame_doys, dtype=np.int16))
+                hf.create_dataset("cloud_fracs",
+                                  data=np.array(frame_cloud_fracs, dtype=np.float32))
+                hf.create_dataset("cloud_cats",
+                                  data=np.array(frame_cloud_cats, dtype=np.int8))
+            log.info(f"  Saved {patch_key}.h5  ({n} frames, "
+                     f"{h5_file.stat().st_size/1e6:.1f} MB)")
+
+            rel = h5_file.relative_to(out_dir).as_posix()
+            all_sequence_rows.append({
+                "patch_key": patch_key, "h5_path": rel,
+                "doys": ",".join(map(str, frame_doys)),
+                "cloud_fracs": ",".join(f"{c:.4f}" for c in frame_cloud_fracs),
+                "cloud_cats": ",".join(map(str, frame_cloud_cats)),
+                "n_frames": n,
+            })
+            for idx, (d, cf, cc) in enumerate(zip(frame_doys, frame_cloud_fracs, frame_cloud_cats)):
+                all_frame_rows.append({
+                    "patch_key": patch_key, "h5_path": rel,
+                    "frame_idx": idx, "doy": d,
+                    "cloud_frac": cf, "cloud_cat": cc,
                 })
-                for rp, doy, cf, cc in zip(rel_paths, frame_doys, frame_cloud_fracs, frame_cloud_cats):
-                    all_frame_rows.append({
-                        "path": rp, "doy": doy,
-                        "cloud_frac": cf, "cloud_cat": cc, "patch_key": patch_key,
-                    })
 
     import pandas as pd
     pd.DataFrame(all_frame_rows).to_csv(out_dir / "index.csv", index=False)
@@ -306,7 +337,12 @@ if __name__ == "__main__":
     parser.add_argument("--patches_csv", default=None,
                         help="CSV from sample_patches.py; if provided, only "
                              "download listed patches instead of the full grid")
+    parser.add_argument("--proxy", action="store_true",
+                        help="Enable HTTP/SOCKS5 proxy (127.0.0.1:33210/33211)")
     args = parser.parse_args()
+
+    if args.proxy:
+        configure_proxy()
 
     patch_list = None
     if args.patches_csv:

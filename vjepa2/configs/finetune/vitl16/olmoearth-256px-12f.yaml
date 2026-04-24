@@ -1,48 +1,46 @@
-app: vjepa_2_1_sentinel2
+app: vjepa_2_1_olmoearth
 
 # ── Compute ──────────────────────────────────────────────────────────────────
 nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
-folder: /your_folder/finetune_s2/vitl.384px.8f
+folder: /your_folder/finetune_olmoearth/vitl.256px.12f
 
-# ── Sentinel-2 data ──────────────────────────────────────────────────────────
-sentinel2:
-  sequences_csv: /your_data/s2_data/sequences.csv
-  # base_dir: parent directory of the s2_data/ folder. Leave empty to use
-  # sequences_csv's parent directory (works when data is next to the CSV).
-  base_dir: ""
-  pretrained_checkpoint: /your_checkpoints/vjepa2_vitl.pth
-  # Bands in order stored in .npy files: B02 B03 B04 B08 B11 B12
-  in_chans: 6
-  # Cloud category filter. 0=clean(<10%), 1=moderate(<30%), 2=cloudy(>=30%)
-  # null = no filter (all frames). See data_pipeline/cloud_ablation.py for all groups.
-  #   Group A: [0]      Group B: [0,1]     Group C/D: null     Group E: [0,1]
-  cloud_cats: [0, 1]
+# ── OLMo-Earth data (local TAR files) ────────────────────────────────────────
+olmoearth:
+  # Glob pattern pointing to your locally downloaded TAR shards.
+  # Download: https://hf-mirror.com/datasets/allenai/olmoearth_pretrain_dataset/tree/main/10_sentinel2_l2a_monthly
+  tar_path: "/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar"
+
+  # 10_sentinel2_l2a_monthly = 10 m bands only: B02 B03 B04 B08
+  # → 4 bands × 12 months = 48 channels per GeoTIFF.
+  # NOTE: B11/B12 (SWIR) live in 20_sentinel2_l2a_monthly (not downloaded yet).
+  #       Download that folder and set n_bands_per_timestep=12 to enable 6-band mode.
+  n_bands_per_timestep: 4
+
+  # Raw pixel scale: 10000.0 if GeoTIFF stores DN (0-10000), 1.0 if reflectance.
+  # Run: python -c "from data_pipeline.olmoearth_dataset import inspect_sample; inspect_sample('<tar_path>')"
+  dn_scale: 10000.0
+  max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
+  shuffle_buffer: 1000
+
+pretrained_checkpoint: /your_checkpoints/vjepa2_vitl.pth
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 data:
-  batch_size: 8              # 384px → ~3× more tokens than 224px; reduce batch to fit A100
-  crop_size: 384             # matches ViT-L/16 pretraining resolution
+  # 256px = OLMo-Earth native tile size (2560 m / 10 m/px). Cannot crop > 256px.
+  # Token count: (256/16)^2 × (12/tubelet_size=2) = 256 × 6 = 1536
+  batch_size: 16
+  crop_size: 256
   patch_size: 16
-  frames_per_clip: 8         # T: number of S2 acquisitions per training sample
-  tubelet_size: 2            # must match pretrained model
+  frames_per_clip: 12        # 12 fixed monthly composites
+  tubelet_size: 2
   num_workers: 4
   persistent_workers: true
   pin_mem: true
-  random_clip: true          # randomly subsample T frames from available sequence
-
-data_aug:
-  random_horizontal_flip: true
-  random_resize_scale:
-    - 0.5
-    - 1.0
-  random_resize_aspect_ratio:
-    - 0.9
-    - 1.1
-  auto_augment: false        # disabled (Apache file removed)
-  reprob: 0.0                # disabled (Apache file removed)
-  motion_shift: false
+  # IterableDataset has no __len__; provide steps/epoch for LR scheduler.
+  # Estimate: 285,288 samples / batch_size 16 ≈ 17,830 steps/epoch.
+  ipe: 17830
 
 # ── Mask collator (same format as V-JEPA 2.1 pretraining) ────────────────────
 mask:
@@ -78,36 +76,29 @@ loss:
   loss_exp: 1.0
   predict_all: true
   reg_coeff: 0.0
-  shift_by_n: 0
-  weight_distance_loss: true
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
   model_name: vit_large
-  in_chans: 6                # S2 6-band input
-  use_doy_encoding: true     # DOY sinusoidal + learned projection
-  use_rope: false            # must be false when use_doy_encoding=true
-                             # (DOY injection requires learned pos_embed)
+  # 4 bands from 10_sentinel2_l2a_monthly: B02 B03 B04 B08
+  # Change to 6 when 20_sentinel2_l2a_monthly is also available.
+  in_chans: 4
+  use_doy_encoding: true     # monthly DOY still informative for phenology
+  use_rope: true             # checkpoint was trained with RoPE (no pos_embed saved)
   pred_depth: 12
   pred_embed_dim: 384
   pred_num_heads: 12
   uniform_power: true
-  modality_embedding: false  # single modality (no img/video mixing)
+  modality_embedding: false
   has_cls_first: false
   n_registers: 0
   n_registers_predictor: 0
-  normalize_predictor: false
   use_mask_tokens: true
   zero_init_mask_tokens: true
   use_activation_checkpointing: false
   use_sdpa: true
 
 # ── Optimization: 3-stage fine-tuning ────────────────────────────────────────
-#
-#  Stage 1: freeze entire ViT backbone, train only patch_embed + doy_encoding
-#  Stage 2: unfreeze last 6 transformer blocks
-#  Stage 3: full fine-tune at low lr
-#
 optimization:
   ema:
     - 0.9995
@@ -132,7 +123,7 @@ optimization:
     weight_decay: 0.05
     final_weight_decay: 0.05
     warmup: 3
-    freeze_backbone: false
+    freeze_backbone: true     # freeze all, selectively unfreeze last n blocks
     unfreeze_last_n_blocks: 6
 
   stage3:
@@ -144,13 +135,12 @@ optimization:
     final_weight_decay: 0.04
     warmup: 0
     freeze_backbone: false
-    unfreeze_last_n_blocks: -1   # -1 means all blocks
+    unfreeze_last_n_blocks: -1
 
 # ── Logging / checkpointing ───────────────────────────────────────────────────
 meta:
   dtype: bfloat16
   seed: 42
-  eval_freq: 5              # evaluate downstream task every N epochs
   save_every_freq: 10
   load_checkpoint: false
   read_checkpoint: null
