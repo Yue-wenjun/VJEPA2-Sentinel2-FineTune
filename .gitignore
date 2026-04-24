@@ -10,6 +10,7 @@ build/
 s2_data/           # Sentinel-2 patches downloaded by download_s2.py
 *.npy              # safety net for stray numpy arrays outside s2_data/
 *.csv              # index.csv / sequences.csv are data-derived, not source
+*.tar
 doc/
 
 # Model weights & checkpoints
