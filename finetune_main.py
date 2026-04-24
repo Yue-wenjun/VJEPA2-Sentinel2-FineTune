@@ -1,13 +1,13 @@
 """
-V-JEPA 2.1 × Sentinel-2 Fine-Tuning Entry Point
+V-JEPA 2.1 × OLMo-Earth Fine-Tuning Entry Point
 
 Usage:
-    python finetune_main.py --config vjepa2/configs/finetune/vitl16/sentinel2-384px-8f.yaml
+    python finetune_main.py --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
 
 Pipeline:
-  1. Sentinel2Dataset yields ([buffer], label, clip_indices, doy_tensor)
+  1. OLMoEarthDataset streams local TAR shards → ([buffer], label, doy_tensor, clip_indices)
   2. MaskCollator (as collate_fn) batches samples and generates JEPA masks
-  3. 6-channel encoder loaded from pretrained weights via Prithvi-style init
+  3. N-channel encoder loaded from pretrained weights via Prithvi-style init
   4. DOY tensor injected into ViT forward pass for seasonal positional encoding
   5. Three-stage training: freeze → partial unfreeze → full fine-tune
 """
@@ -28,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent / "vjepa2"))
 import app.vjepa_2_1.models.predictor as vit_pred
 import app.vjepa_2_1.models.vision_transformer as video_vit
 from app.vjepa_2_1.wrappers import MultiSeqWrapper, PredictorMultiSeqWrapper
-from data_pipeline.patch_embed_6ch import build_6ch_patch_embed_from_pretrained
-from data_pipeline.sentinel2_dataset import Sentinel2Dataset
+from data_pipeline.patch_embed_6ch import build_nch_patch_embed_from_pretrained
+from data_pipeline.olmoearth_dataset import OLMoEarthDataset
 from src.masks.multiseq_multiblock3d import MaskCollator
 from src.masks.utils import apply_masks
 from src.utils.schedulers import CosineWDSchedule, WarmupCosineSchedule
@@ -51,14 +51,14 @@ def load_config(path: str) -> dict:
 def build_model(cfg: dict, device: torch.device):
     m = cfg["model"]
     d = cfg["data"]
-    s2 = cfg["sentinel2"]
+    in_chans = m["in_chans"]
 
     encoder_backbone = video_vit.__dict__[m["model_name"]](
         img_size=d["crop_size"],
         patch_size=d["patch_size"],
         num_frames=d["frames_per_clip"],
         tubelet_size=d["tubelet_size"],
-        in_chans=s2["in_chans"],
+        in_chans=in_chans,
         use_doy_encoding=m.get("use_doy_encoding", True),
         use_rope=m.get("use_rope", False),
         uniform_power=m.get("uniform_power", True),
@@ -94,33 +94,64 @@ def build_model(cfg: dict, device: torch.device):
     return encoder, predictor
 
 
-def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.device):
+def _strip_prefix(state_dict: dict) -> dict:
+    """Strip DDP/wrapper key prefixes: 'module.backbone.' or 'module.' or 'backbone.'."""
+    if not state_dict:
+        return state_dict
+    sample = next(iter(state_dict))
+    for prefix in ("module.backbone.", "module.", "backbone."):
+        if sample.startswith(prefix):
+            return {k[len(prefix):]: v for k, v in state_dict.items()}
+    return state_dict
+
+
+def _safe_load(module: nn.Module, state_dict: dict):
+    """load_state_dict that silently skips shape-mismatched keys (strict=False)."""
+    own = module.state_dict()
+    compatible = {k: v for k, v in state_dict.items()
+                  if k not in own or own[k].shape == v.shape}
+    return module.load_state_dict(compatible, strict=False)
+
+
+def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.device, in_chans: int = 6):
     """
     Load V-JEPA 2.1 pretrained weights.
-    enc_state keys have no "encoder." prefix (already inside ckpt["encoder"]).
-    patch_embed is re-initialised via Prithvi-style 3ch→6ch channel averaging.
-    doy_encoding stays at random init (new module, not in pretrained ckpt).
+    Handles DDP-wrapped checkpoints (module.backbone.* prefix).
+    patch_embed is re-initialised via Prithvi-style 3ch→Nch channel averaging.
+    Predictor: loaded with shape-safe filter (checkpoint may differ in dist. architecture).
+    doy_encoding: stays at random init (new module, not in pretrained ckpt).
     """
     log.info(f"Loading pretrained checkpoint: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    enc_state = ckpt.get("encoder", ckpt)
+    enc_state = _strip_prefix(ckpt.get("encoder", ckpt))
 
     # Prithvi-style patch_embed init: keys are "patch_embed.proj.weight/bias"
-    new_patch_embed = build_6ch_patch_embed_from_pretrained(
+    new_patch_embed = build_nch_patch_embed_from_pretrained(
         pretrained_state_dict=enc_state,
+        in_chans=in_chans,
         patch_size=encoder.backbone.patch_size,
         tubelet_size=encoder.backbone.tubelet_size,
         embed_dim=encoder.backbone.embed_dim,
     ).to(device)
     encoder.backbone.patch_embed = new_patch_embed
 
-    # Load remaining weights; mismatched keys (patch_embed, doy_encoding) skipped
-    msg = encoder.backbone.load_state_dict(enc_state, strict=False)
-    log.info(f"Encoder: {msg}")
+    # Exclude patch_embed (shape [D,3,t,p,p] vs our [D,N,t,p,p]) and load rest.
+    # doy_encoding and pos_embed (RoPE ckpt has neither) → expected missing keys.
+    enc_state_filtered = {k: v for k, v in enc_state.items()
+                          if not k.startswith("patch_embed")}
+    msg = _safe_load(encoder.backbone, enc_state_filtered)
+    missing_blocks = [k for k in msg.missing_keys
+                      if not k.startswith(("doy_encoding", "patch_embed", "pos_embed"))]
+    if missing_blocks:
+        log.warning(f"Encoder unexpected missing keys: {missing_blocks[:5]}")
+    log.info(f"Encoder loaded — missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)}")
 
     if "predictor" in ckpt:
-        msg = predictor.backbone.load_state_dict(ckpt["predictor"], strict=False)
-        log.info(f"Predictor: {msg}")
+        # Checkpoint predictor may have been built for distillation (different out_dim).
+        # Load whatever shapes match; skip the rest — predictor adapts quickly.
+        pred_state = _strip_prefix(ckpt["predictor"])
+        msg = _safe_load(predictor.backbone, pred_state)
+        log.info(f"Predictor loaded — missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)}")
 
 
 # ── freeze / unfreeze ─────────────────────────────────────────────────────────
@@ -213,7 +244,7 @@ def run_one_epoch(
             # collated_batch is [buffers, labels, clip_indices, doys]
             # buffers: list of [B, C, T, H, W] tensors (one per clip count)
             clips = collated_batch[0]    # list length 1 for our dataset
-            doys = collated_batch[3]     # [B, T] int32
+            doys = collated_batch[2]     # [B, T] int32  (index 2: doy_tensor before clip_indices)
 
             x = clips[0].to(device, non_blocking=True)      # [B, 6, T, H, W]
             doys = doys.to(device, non_blocking=True)        # [B, T]
@@ -222,19 +253,21 @@ def run_one_epoch(
 
             optimizer.zero_grad()
             with torch.autocast(device_type=device.type, dtype=dtype):
-                # Context encoding (masked)
-                z_ctx = encoder([x], masks=masks_enc, doys=doys)
+                # Context encoding (masked); training_mode=True returns hierarchical
+                # features [B, N_ctx, 4*embed_dim] required by predictor_embed.
+                z_ctx = encoder([x], masks=masks_enc, doys=doys, training_mode=True)
 
-                # Target encoding (EMA, no grad, full sequence)
+                # Target encoding (EMA, no grad, full sequence); same hierarchical
+                # output so z_tgt dims match z_pred after predictor_proj.
                 with torch.no_grad():
-                    z_tgt_full = target_encoder([x], doys=doys)
+                    z_tgt_full = target_encoder([x], doys=doys, training_mode=True)
                     z_tgt = [
                         [apply_masks(z, m) for m in mp]
                         for z, mp in zip(z_tgt_full, masks_pred)
                     ]
 
-                # Predictor
-                z_pred = predictor(z_ctx, masks_enc, masks_pred)
+                # Predictor (returns outs_pred, outs_context; only predictions needed for loss)
+                z_pred, _ = predictor(z_ctx, masks_enc, masks_pred)
 
                 # Smooth-L1 JEPA loss
                 loss = 0.0
@@ -301,19 +334,21 @@ def main():
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    d_cfg = cfg["data"]
-    s2_cfg = cfg["sentinel2"]
+    d_cfg   = cfg["data"]
+    oe_cfg  = cfg["olmoearth"]
     opt_cfg = cfg["optimization"]
 
     # ── dataset + collator ────────────────────────────────────────────────────
-    dataset = Sentinel2Dataset(
-        sequences_csv=s2_cfg["sequences_csv"],
-        base_dir=s2_cfg.get("base_dir", ""),
-        cloud_cats=s2_cfg.get("cloud_cats", None),
-        frames_per_clip=d_cfg["frames_per_clip"],
+    dataset = OLMoEarthDataset(
+        tar_path=oe_cfg["tar_path"],
+        n_bands_per_timestep=oe_cfg.get("n_bands_per_timestep", 4),
         crop_size=d_cfg["crop_size"],
+        dn_scale=oe_cfg.get("dn_scale", 10000.0),
+        max_missing_frac=oe_cfg.get("max_missing_frac", 0.10),
+        shuffle_buffer=oe_cfg.get("shuffle_buffer", 1000),
+        seed=cfg["meta"].get("seed", 42),
     )
-    log.info(f"Dataset: {len(dataset)} sequences")
+    log.info(f"Dataset: OLMoEarthDataset — {len(dataset.tar_files)} TAR shards")
 
     mask_collator = MaskCollator(
         cfgs_mask=cfg["mask"],
@@ -323,17 +358,18 @@ def main():
         tubelet_size=d_cfg["tubelet_size"],
     )
 
+    num_workers = d_cfg.get("num_workers", 4)
     loader = torch.utils.data.DataLoader(
         dataset,
         collate_fn=mask_collator,
         batch_size=d_cfg["batch_size"],
-        shuffle=True,
+        shuffle=False,       # IterableDataset: shuffling handled inside dataset
         drop_last=True,
-        num_workers=d_cfg.get("num_workers", 4),
+        num_workers=num_workers,
         pin_memory=d_cfg.get("pin_mem", True),
-        persistent_workers=(d_cfg.get("num_workers", 4) > 0),
+        persistent_workers=(num_workers > 0),
     )
-    log.info(f"DataLoader: {len(loader)} batches/epoch")
+    log.info("DataLoader ready")
 
     # ── model ─────────────────────────────────────────────────────────────────
     encoder, predictor = build_model(cfg, device)
@@ -341,12 +377,29 @@ def main():
     for p in target_encoder.parameters():
         p.requires_grad = False
 
-    load_pretrained_weights(encoder, predictor, s2_cfg["pretrained_checkpoint"], device)
+    ckpt_path = cfg.get("pretrained_checkpoint")
+    if ckpt_path:
+        load_pretrained_weights(encoder, predictor, ckpt_path, device,
+                                in_chans=cfg["model"]["in_chans"])
+    else:
+        log.warning("No pretrained_checkpoint specified — training from scratch")
 
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     ema = opt_cfg["ema"][0]
     loss_exp = cfg["loss"].get("loss_exp", 1.0)
     save_freq = cfg["meta"].get("save_every_freq", 10)
+
+    # ── steps-per-epoch (IterableDataset has no __len__) ─────────────────────
+    try:
+        ipe = len(loader)
+    except TypeError:
+        ipe = d_cfg.get("ipe")
+        if ipe is None:
+            raise ValueError(
+                "IterableDataset has no __len__. Set data.ipe in the config "
+                "(e.g. ipe: 17830 for 285288 samples / batch_size 16)."
+            )
+        log.info(f"IterableDataset: using ipe={ipe} from config (data.ipe)")
 
     # ── 3-stage training ──────────────────────────────────────────────────────
     global_epoch = 0
@@ -356,7 +409,7 @@ def main():
 
         set_freeze_stage(encoder, stage_cfg)
         optimizer, scheduler, wd_scheduler = build_optimizer(
-            encoder, predictor, stage_cfg, ipe=len(loader)
+            encoder, predictor, stage_cfg, ipe=ipe
         )
 
         for _ in range(stage_cfg["epochs"]):

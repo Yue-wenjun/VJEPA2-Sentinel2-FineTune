@@ -63,12 +63,20 @@ _PROXY_HTTP  = "http://127.0.0.1:33210"
 _PROXY_SOCKS = "socks5://127.0.0.1:33211"
 
 def configure_proxy() -> None:
-    """Set HTTP/SOCKS proxy env vars for requests, urllib3, and GDAL COG reads."""
+    """Set HTTP/SOCKS proxy env vars for requests, urllib3, and GDAL COG reads.
+
+    Python requests/urllib → HTTP proxy (33210)
+    GDAL/vsicurl           → SOCKS5 proxy (33211)
+
+    GDAL uses libcurl. HTTP CONNECT tunnels + Windows schannel cause TLS handshake
+    failures. SOCKS5 forwards raw TCP transparently, so TLS goes end-to-end and
+    schannel works correctly.
+    """
     os.environ["HTTP_PROXY"]       = _PROXY_HTTP
     os.environ["HTTPS_PROXY"]      = _PROXY_HTTP
     os.environ["ALL_PROXY"]        = _PROXY_SOCKS
-    os.environ["GDAL_HTTP_PROXY"]  = _PROXY_HTTP
-    log.info(f"Proxy: HTTP/HTTPS → {_PROXY_HTTP}  SOCKS → {_PROXY_SOCKS}")
+    os.environ["GDAL_HTTP_PROXY"]  = _PROXY_SOCKS   # SOCKS5: no TLS interception
+    log.info(f"Proxy: requests → {_PROXY_HTTP}  GDAL/vsicurl → {_PROXY_SOCKS}")
 
 # --- Constants ---------------------------------------------------------------
 

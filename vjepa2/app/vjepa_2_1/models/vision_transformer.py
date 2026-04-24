@@ -112,6 +112,14 @@ class VisionTransformer(nn.Module):
 
         self.uniform_power = uniform_power
 
+        # pos_embed: required when use_rope=False; loaded from pretrained ckpt via load_state_dict.
+        # Initialized to zeros here so the model is usable before a checkpoint is loaded.
+        if not use_rope:
+            self.pos_embed = nn.Parameter(
+                torch.zeros(1, self.num_patches, embed_dim),
+                requires_grad=False,
+            )
+
         self.use_rope = use_rope
         self.blocks = nn.ModuleList(
             [

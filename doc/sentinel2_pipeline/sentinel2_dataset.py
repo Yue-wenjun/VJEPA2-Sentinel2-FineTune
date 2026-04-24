@@ -2,12 +2,13 @@
 Sentinel-2 Dataset compatible with V-JEPA 2.1 training pipeline.
 
 Drop-in replacement for VideoDataset:
-  - Reads .npy patch files saved by download_s2.py  [H, W, 6]
-  - Assembles temporal sequences                    [T, H, W, 6]
+  - Reads per-patch .h5 files saved by download_s2.py
+  - h5 dataset 'frames': uint16 [N, H, W, 6], stored as DN*10000
+  - Assembles temporal sequences [T, H, W, 6], converts to float32 reflectance
   - Injects DOY encoding as additive positional signal
   - Returns ([buffer], label, clip_indices, doy_tensor) — same as VideoDataset plus doy_tensor
 
-Band order in saved .npy files: B02 B03 B04 B08 B11 B12
+Band order: B02 B03 B04 B08 B11 B12
 Band statistics (per-band mean/std over S2 L2A corpus, reflectance 0-1):
 
     Band   mean    std
@@ -22,6 +23,7 @@ Band statistics (per-band mean/std over S2 L2A corpus, reflectance 0-1):
 import math
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
 import torch
@@ -87,42 +89,46 @@ class Sentinel2Dataset(Dataset):
         df = pd.read_csv(sequences_csv)
         self.sequences = []
         for _, row in df.iterrows():
-            paths = [str(_base / p) for p in row["frame_paths"].split(",")]
-            doys  = list(map(int, str(row["doys"]).split(",")))
+            h5_path = str(_base / row["h5_path"])
+            doys = list(map(int, str(row["doys"]).split(",")))
+            indices = list(range(len(doys)))
             if _allowed is not None and "cloud_cats" in df.columns:
                 cats = list(map(int, str(row["cloud_cats"]).split(",")))
-                valid = [(p, d) for p, d, c in zip(paths, doys, cats) if c in _allowed]
-                if not valid:
+                pairs = [(i, d) for i, d, c in zip(indices, doys, cats) if c in _allowed]
+                if not pairs:
                     continue
-                paths, doys = zip(*valid)
-                paths, doys = list(paths), list(doys)
-            if len(paths) >= frames_per_clip:
-                self.sequences.append({"paths": paths, "doys": doys})
+                indices, doys = zip(*pairs)
+                indices, doys = list(indices), list(doys)
+            if len(indices) >= frames_per_clip:
+                self.sequences.append({"h5_path": h5_path,
+                                       "indices": indices, "doys": doys})
 
     def __len__(self):
         return len(self.sequences)
 
     def __getitem__(self, index):
         seq = self.sequences[index]
-        paths, doys = seq["paths"], seq["doys"]
-        n = len(paths)
+        all_indices, all_doys = seq["indices"], seq["doys"]
+        n = len(all_indices)
 
-        # Sample T frame indices
+        # Sample T frame positions within the (already cloud-filtered) index list
         if self.random_clip:
             start = np.random.randint(0, n - self.frames_per_clip + 1)
-            indices = list(range(start, start + self.frames_per_clip))
+            clip_pos = list(range(start, start + self.frames_per_clip))
         else:
             step = max(1, n // self.frames_per_clip)
-            indices = list(range(0, n, step))[: self.frames_per_clip]
+            clip_pos = list(range(0, n, step))[: self.frames_per_clip]
 
-        frames, clip_doys = [], []
-        for i in indices:
-            arr = np.load(paths[i])       # [H, W, 6] float32
-            frames.append(arr)
-            clip_doys.append(doys[i])
+        h5_frame_idx = sorted([all_indices[p] for p in clip_pos])   # h5 requires sorted
+        clip_doys    = [all_doys[p] for p in clip_pos]
 
-        buffer = np.stack(frames, axis=0)   # [T, H, W, 6]
-        buffer = torch.from_numpy(buffer)   # [T, H, W, 6]
+        # Read all needed frames in one h5 open — open/close per call for worker safety
+        with h5py.File(seq["h5_path"], "r") as hf:
+            frames_u16 = hf["frames"][h5_frame_idx]   # [T, H, W, 6] uint16
+
+        buffer = torch.from_numpy(
+            frames_u16.astype(np.float32) / 10000.0    # DN → reflectance [T, H, W, 6]
+        )
 
         # Random crop
         T, H, W, C = buffer.shape
@@ -147,14 +153,14 @@ class Sentinel2Dataset(Dataset):
             buffer = (buffer - mean) / std
 
         label = 0
-        clip_indices = [np.array(indices, dtype=np.int64)]
-        doy_tensor = torch.tensor([clip_doys[i] for i in range(len(indices))], dtype=torch.int32)
-        return [buffer], label, clip_indices, doy_tensor
+        clip_indices = [np.array(h5_frame_idx, dtype=np.int64)]
+        doy_tensor = torch.tensor(clip_doys, dtype=torch.int32)
+        # clip_indices must be last: MaskCollator detects fpc via len(sample[-1][-1])
+        return [buffer], label, doy_tensor, clip_indices
 
     def get_doy_encodings(self, index) -> torch.Tensor:
         """Returns DOY encodings [T, DOY_DIM] for the clip at index (for positional injection)."""
-        seq = self.sequences[index]
-        _, doys = seq["paths"], seq["doys"]
+        doys = self.sequences[index]["doys"]
         return torch.stack([doy_encoding(d) for d in doys[: self.frames_per_clip]])
 
 

@@ -141,6 +141,11 @@ class VisionTransformerPredictor(nn.Module):
         self.uniform_power = uniform_power
 
         self.use_rope = use_rope
+        if not use_rope:
+            self.predictor_pos_embed = nn.Parameter(
+                torch.zeros(1, self.num_patches, predictor_embed_dim),
+                requires_grad=False,
+            )
         self.predictor_blocks = nn.ModuleList(
             [
                 Block(

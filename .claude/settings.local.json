@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(rm -rf /c/My_Resources/work01/VJEPA2.1FineTune/vjepa2/.git)",
+      "Bash(git commit -m ' *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(git branch *)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.pjreddie.com)",
+      "WebFetch(domain:anil.recoil.org)",
+      "Bash(python3 -c ' *)",
+      "Bash(python -c ' *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:hf-mirror.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(python)",
+      "Bash(python add_viz_cells.py)"
+    ]
+  }
+}
