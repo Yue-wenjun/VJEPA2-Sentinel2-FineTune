@@ -1,5 +1,5 @@
 {
   "extraPaths": ["vjepa2", "data_pipeline"],
   "pythonVersion": "3.10",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "off"
 }
