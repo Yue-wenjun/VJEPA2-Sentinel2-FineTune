@@ -29,3 +29,7 @@ pretrained/        # V-JEPA 2.1 pretrained weights downloaded at runtime
 # Logs / experiment tracking
 *.log
 wandb/
+
+# Temporary files
+*~
+.DS_Store
