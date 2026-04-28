@@ -145,7 +145,11 @@ class OLMoEarthDataset(IterableDataset):
             return  # no shards for this rank/worker combination
 
         ds = (
-            wds.WebDataset(worker_shards, shardshuffle=500)
+            wds.WebDataset(
+                worker_shards,
+                shardshuffle=500,
+                nodesplitter=lambda src: src,  # shards already split manually; bypass webdataset's check
+            )
             .shuffle(self.shuffle_buffer)
         )
 
