@@ -28,7 +28,6 @@ Returns (matches Sentinel2Dataset convention for MaskCollator):
 from __future__ import annotations
 
 import glob as _glob
-import os
 from typing import Iterator, Sequence
 
 import numpy as np
@@ -132,23 +131,17 @@ class OLMoEarthDataset(IterableDataset):
 
         worker_info = torch.utils.data.get_worker_info()
         worker_id   = worker_info.id if worker_info is not None else 0
-        num_workers = worker_info.num_workers if worker_info is not None else 1
         rng = np.random.default_rng(self.seed + worker_id)
 
-        # Manual shard splitting: rank-level first, then DataLoader worker within rank.
-        # This replaces webdataset's split_by_node and avoids version-specific kwargs.
-        rank       = int(os.environ.get("RANK", 0))
-        world_size = int(os.environ.get("WORLD_SIZE", 1))
-        rank_shards   = self.tar_files[rank::world_size]
-        worker_shards = rank_shards[worker_id::num_workers]
-        if not worker_shards:
-            return  # no shards for this rank/worker combination
-
+        # Let webdataset handle both rank-level (nodesplitter=split_by_node)
+        # and worker-level splitting internally. empty_check=False silences the
+        # "no samples" ValueError when a worker legitimately receives 0 shards.
         ds = (
             wds.WebDataset(
-                worker_shards,
+                self.tar_files,
                 shardshuffle=500,
-                nodesplitter=lambda src: src,  # shards already split manually; bypass webdataset's check
+                nodesplitter=wds.split_by_node,
+                empty_check=False,
             )
             .shuffle(self.shuffle_buffer)
         )
