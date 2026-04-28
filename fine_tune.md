@@ -160,19 +160,6 @@ python finetune_main.py --config vjepa2/configs/finetune/vitl16/olmoearth-256px-
 
 ---
 
-## 文件索引
-
-| 文件 | 用途 |
-|------|------|
-| [data_pipeline/olmoearth_dataset.py](data_pipeline/olmoearth_dataset.py) | OLMo-Earth webdataset 读取；本地 TAR；4/6 波段可配置；`inspect_sample()` |
-| [data_pipeline/patch_embed_6ch.py](data_pipeline/patch_embed_6ch.py) | N-ch PatchEmbed3D + Prithvi-style 权重初始化 |
-| [data_pipeline/requirements.txt](data_pipeline/requirements.txt) | 依赖列表 |
-| [finetune_main.py](finetune_main.py) | 训练入口（3阶段冻结/解冻、EMA、JEPA 损失） |
-| [vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml](vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml) | 训练配置（256px，4波段，12帧） |
-| [doc/sentinel2_pipeline/](doc/sentinel2_pipeline/) | 旧版 Sentinel-2 自采 pipeline（归档，不维护） |
-
----
-
 ## 算力估算
 
 ### 假设条件
@@ -216,11 +203,37 @@ huggingface-cli download facebook/vjepa2 vjepa2_vitl16.pth --local-dir ./pretrai
 
 ---
 
+## 文件索引
+
+| 文件 | 用途 |
+|------|------|
+| [data_pipeline/olmoearth_dataset.py](data_pipeline/olmoearth_dataset.py) | OLMo-Earth webdataset 读取；本地 TAR；4/6 波段可配置；`inspect_sample()` |
+| [data_pipeline/patch_embed_6ch.py](data_pipeline/patch_embed_6ch.py) | N-ch PatchEmbed3D + Prithvi-style 权重初始化 |
+| [data_pipeline/requirements.txt](data_pipeline/requirements.txt) | 依赖列表 |
+| [finetune_main.py](finetune_main.py) | 训练入口（3阶段冻结/解冻、EMA、JEPA 损失） |
+| [finetune.ipynb](finetune.ipynb) | 训练启动 notebook（配置、sanity check、3阶段训练、loss 曲线、embedding 提取） |
+| [vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml](vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml) | 训练配置（256px，4波段，12帧） |
+| [doc/sentinel2_pipeline/](doc/sentinel2_pipeline/) | 旧版 Sentinel-2 自采 pipeline（归档，不维护） |
+| [debug.ipynb](debug.ipynb) | 逐步验证 notebook（数据检查 → 模型构建 → 真实数据前向/后向 → mask 可视化 → PCA） |
+
+---
+
+## 已验证（debug.ipynb）
+
+- [x] `inspect_sample()` 确认 TAR 通道数和值域（dn_scale=10000.0）
+- [x] Prithvi-style 4ch patch_embed 初始化（RGB → 4ch 平均复制）
+- [x] `vjepa2_1_vitl_dist_vitG_384.pt` 加载成功（encoder missing=0 important keys）
+- [x] 微调前 loss：0.287（随机初始化 predictor = 0.474，预训练权重有效迁移）
+- [x] V-JEPA block mask 已接入（Gen0：8小块15%空间；Gen1：2大块70%空间；均跨全时序）
+- [x] PCA embedding 可视化确认 encoder 区分水体/植被/城区
+- [x] `finetune_main.py` mask 格式 bug 修复（`[[gen0, gen1]]` 包装；`apply_masks(z, [m])`）
+
+---
+
 ## 待办
 
-- [ ] 运行 `inspect_sample()` 确认 TAR 通道数（48ch）和值域（dn_scale=10000.0）
-- [ ] 填写 yaml 中的 `tar_path` 和 `pretrained_checkpoint` 实际路径
-- [ ] 用 1×A100 先跑 Stage 1 前 50 步，验证 loss 下降正常
-- [ ] 确认 per-band 归一化统计值（当前为文献近似值）
+- [ ] 填写 yaml 中的 `tar_path` 和 `pretrained_checkpoint` 实际路径（参见 `finetune.ipynb` Cell 1）
+- [ ] 跑 Stage 1 前 50 步（`STEPS_CAP=50`），确认 loss 稳定下降
+- [ ] 确认 per-band 归一化统计值（当前为文献近似值，建议在实际数据上重新计算）
 - [ ] 确定下游验证任务（变化检测 / 土地分类）和评估指标
 - [ ] 若需 6 波段：下载 `20_sentinel2_l2a_monthly`，更新 YAML `n_bands_per_timestep: 12`，`in_chans: 6`

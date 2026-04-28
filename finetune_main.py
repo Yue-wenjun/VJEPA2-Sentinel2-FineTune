@@ -241,15 +241,16 @@ def run_one_epoch(
     # MaskCollator returns list of (collated_batch, masks_enc, masks_pred) per fpc
     for fpc_collations in loader:
         for collated_batch, masks_enc, masks_pred in fpc_collations:
-            # collated_batch is [buffers, labels, clip_indices, doys]
+            # collated_batch is [buffers, labels, doys, clip_indices]
             # buffers: list of [B, C, T, H, W] tensors (one per clip count)
             clips = collated_batch[0]    # list length 1 for our dataset
-            doys = collated_batch[2]     # [B, T] int32  (index 2: doy_tensor before clip_indices)
+            doys = collated_batch[2]     # [B, T] int32
 
-            x = clips[0].to(device, non_blocking=True)      # [B, 6, T, H, W]
+            x = clips[0].to(device, non_blocking=True)      # [B, C, T, H, W]
             doys = doys.to(device, non_blocking=True)        # [B, T]
-            masks_enc = [[m.to(device) for m in me] for me in masks_enc]
-            masks_pred = [[m.to(device) for m in mp] for mp in masks_pred]
+            # MaskCollator returns [gen0[B,K0], gen1[B,K1]]; wrap in clip list: [[gen0, gen1]]
+            masks_enc  = [[m.to(device) for m in masks_enc]]
+            masks_pred = [[m.to(device) for m in masks_pred]]
 
             optimizer.zero_grad()
             with torch.autocast(device_type=device.type, dtype=dtype):
@@ -262,7 +263,7 @@ def run_one_epoch(
                 with torch.no_grad():
                     z_tgt_full = target_encoder([x], doys=doys, training_mode=True)
                     z_tgt = [
-                        [apply_masks(z, m) for m in mp]
+                        [apply_masks(z, [m]) for m in mp]
                         for z, mp in zip(z_tgt_full, masks_pred)
                     ]
 
