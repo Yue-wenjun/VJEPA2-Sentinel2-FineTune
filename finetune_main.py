@@ -420,8 +420,11 @@ def main():
 
     # ── DDP wrap (after weight loading so backbone attr is accessible) ────────
     if is_ddp:
-        encoder   = DistributedDataParallel(encoder,   device_ids=[local_rank])
-        predictor = DistributedDataParallel(predictor, device_ids=[local_rank])
+        # find_unused_parameters=True is required because Stage 1 freezes backbone
+        # params, which never receive gradients and would otherwise trigger DDP's
+        # "reduction not finished" check.
+        encoder   = DistributedDataParallel(encoder,   device_ids=[local_rank], find_unused_parameters=True)
+        predictor = DistributedDataParallel(predictor, device_ids=[local_rank], find_unused_parameters=True)
 
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     ema = opt_cfg["ema"][0]

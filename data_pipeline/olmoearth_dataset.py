@@ -136,8 +136,9 @@ class OLMoEarthDataset(IterableDataset):
         ds = (
             wds.WebDataset(
                 self.tar_files,
-                shardshuffle=True,
+                shardshuffle=500,
                 nodesplitter=wds.split_by_node,   # splits shards across DDP ranks (RANK/WORLD_SIZE)
+                empty_check=False,                # allow workers that receive 0 shards to exit silently
             )
             .shuffle(self.shuffle_buffer)
         )
