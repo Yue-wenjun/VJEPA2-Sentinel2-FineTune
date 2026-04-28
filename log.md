@@ -1,5 +1,52 @@
 # 变更日志
 
+## 2026-04-25
+
+### OLMo-Earth 端到端 pipeline 验证 & finetune 全套准备
+
+#### 1. 微调前基线确认
+
+| 指标 | 值 |
+|------|----|
+| 随机初始化 predictor loss | 0.474 |
+| **预训练 encoder + 随机 predictor loss** | **0.287** |
+| 说明 | loss 下降 ~40%，证明预训练权重有效迁移 |
+
+PCA 可视化（debug.ipynb Section 6）确认 encoder 在 fine-tune 前已区分水体/植被/城区 patch embedding。
+
+#### 2. V-JEPA 正确 block mask 已接入
+
+替换 debug notebook 中的 MAE 随机掩码（`torch.randperm`）为真实 `MaskCollator` block mask：
+
+| Generator | num_blocks | spatial_scale | 覆盖率 | 用途 |
+|-----------|-----------|---------------|--------|------|
+| Gen0 | 8 | 15% | ~70% | encoder 上下文孔洞 |
+| Gen1 | 2 | 70% | ~88% | 主预测目标 |
+
+两个 generator 均跨全部 6 个时间 tubelet（temporal_scale=1.0）。
+
+#### 3. patch size 说明
+
+OLMo-Earth 原生 tile 256px + V-JEPA 预训练 patch_size=16px → 空间 patch grid = 16×16。论文可视化更清晰系因输入 384px（24×24 grid），非算法差异。当前配置为硬约束（数据集上限 256px + 预训练权重固定 patch_size）。
+
+#### 4. finetune_main.py — 修复 run_one_epoch 两处 bug
+
+**问题**：`run_one_epoch` 中对 MaskCollator 输出的格式转换错误，导致 B>1 时训练必然崩溃。
+
+| 位置 | 错误代码 | 修复代码 |
+|------|---------|---------|
+| masks 格式转换 | `[[m.to(device) for m in me] for me in masks_enc]` | `[[m.to(device) for m in masks_enc]]` |
+| z_tgt apply_masks | `apply_masks(z, m)` | `apply_masks(z, [m])` — 必须传 list，否则 B>1 时 gather dim 不匹配 |
+
+**根因**：MaskCollator 返回 `[gen0_tensor, gen1_tensor]`（outer=generators，每个 `[B, n]`）；encoder 期望格式为 `[[gen0, gen1]]`（outer=clips, inner=generators）。原代码对每个 generator tensor 按 batch 行迭代，B=1 时侥幸通过，B>1 必然崩溃。
+
+#### 5. fine_tune.md + finetune.ipynb
+
+- `fine_tune.md`：新增"文件索引"与"已验证"checklist，更新"待办"；
+- `finetune.ipynb`：新建完整训练 notebook（路径配置 → sanity check → 3阶段训练 → loss 曲线 → CLI 命令 → embedding 提取 + PCA）。
+
+---
+
 ## 2026-04-23
 
 ### sample_patches.py 运行记录 — 第一轮全类采样
