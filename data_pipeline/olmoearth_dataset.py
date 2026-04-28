@@ -137,7 +137,7 @@ class OLMoEarthDataset(IterableDataset):
             wds.WebDataset(
                 self.tar_files,
                 shardshuffle=True,
-                nodesplitter=wds.split_by_worker,
+                nodesplitter=wds.split_by_node,   # splits shards across DDP ranks (RANK/WORLD_SIZE)
             )
             .shuffle(self.shuffle_buffer)
         )
@@ -182,9 +182,11 @@ class OLMoEarthDataset(IterableDataset):
         arr = np.clip(arr, 0.0, 1.0)
 
         # ── random spatial crop ───────────────────────────────────────────
-        if H > self.crop_size:
-            top  = rng.integers(0, H - self.crop_size)
-            left = rng.integers(0, W - self.crop_size)
+        if H < self.crop_size or W < self.crop_size:
+            return None   # skip undersized tiles (edge tiles in the TAR)
+        if H > self.crop_size or W > self.crop_size:
+            top  = rng.integers(0, H - self.crop_size + 1)
+            left = rng.integers(0, W - self.crop_size + 1)
             arr  = arr[:, :, top:top + self.crop_size, left:left + self.crop_size]
 
         # ── random horizontal flip ────────────────────────────────────────

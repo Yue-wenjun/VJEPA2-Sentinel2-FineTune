@@ -15,13 +15,16 @@ Pipeline:
 import argparse
 import copy
 import logging
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import yaml
+from torch.nn.parallel import DistributedDataParallel
 
 sys.path.insert(0, str(Path(__file__).parent / "vjepa2"))
 
@@ -37,6 +40,19 @@ from src.utils.schedulers import CosineWDSchedule, WarmupCosineSchedule
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+# PyTorch 2.1.x has a bug in collate_tensor_fn: it passes element count (not byte
+# count) to untyped_storage()._new_shared(), allocating 4× too few bytes for float32,
+# then calls resize_() on the resulting non-resizable file-backed shared memory.
+# Fix: replace the pre-allocation path with a plain torch.stack (same result, no shm).
+try:
+    import torch.utils.data._utils.collate as _pt_collate
+    if torch.Tensor in _pt_collate.default_collate_fn_map:
+        _pt_collate.default_collate_fn_map[torch.Tensor] = (
+            lambda batch, **_: torch.stack(batch, 0)
+        )
+except Exception:
+    pass
 
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -113,6 +129,12 @@ def _safe_load(module: nn.Module, state_dict: dict):
     return module.load_state_dict(compatible, strict=False)
 
 
+def _backbone(model):
+    """Unwrap DDP wrapper and return the .backbone module."""
+    m = model.module if hasattr(model, "module") else model
+    return m.backbone
+
+
 def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.device, in_chans: int = 6):
     """
     Load V-JEPA 2.1 pretrained weights.
@@ -159,7 +181,7 @@ def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.de
 def set_freeze_stage(encoder, stage_cfg: dict):
     freeze = stage_cfg.get("freeze_backbone", False)
     n_unfreeze = stage_cfg.get("unfreeze_last_n_blocks", -1)
-    backbone = encoder.backbone
+    backbone = _backbone(encoder)
 
     for p in backbone.parameters():
         p.requires_grad = not freeze
@@ -231,6 +253,7 @@ def run_one_epoch(
     ema_momentum: float,
     loss_exp: float,
     epoch: int,
+    rank0: bool = True,
 ):
     encoder.train()
     predictor.train()
@@ -299,7 +322,7 @@ def run_one_epoch(
 
             total_loss += loss.item()
             n_batches += 1
-            if n_batches % 50 == 0:
+            if rank0 and n_batches % 50 == 0:
                 log.info(f"  epoch {epoch:04d}  step {n_batches:5d}  loss={loss.item():.4f}")
 
     return total_loss / max(n_batches, 1)
@@ -310,8 +333,8 @@ def run_one_epoch(
 def save_checkpoint(encoder, predictor, optimizer, epoch, path):
     torch.save({
         "epoch": epoch,
-        "encoder": encoder.backbone.state_dict(),
-        "predictor": predictor.backbone.state_dict(),
+        "encoder": _backbone(encoder).state_dict(),
+        "predictor": _backbone(predictor).state_dict(),
         "opt": optimizer.state_dict(),
     }, path)
     log.info(f"Saved → {path}")
@@ -322,18 +345,27 @@ def save_checkpoint(encoder, predictor, optimizer, epoch, path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
+    # ── DDP init ──────────────────────────────────────────────────────────────
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_ddp = world_size > 1
+    if is_ddp:
+        dist.init_process_group("nccl")
+        torch.cuda.set_device(local_rank)
+    rank0 = (local_rank == 0)
+
     cfg = load_config(args.config)
-    device = torch.device(args.device)
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if cfg["meta"].get("dtype") == "bfloat16" else torch.float32
     folder = Path(cfg["folder"])
-    folder.mkdir(parents=True, exist_ok=True)
+    if rank0:
+        folder.mkdir(parents=True, exist_ok=True)
 
     seed = cfg["meta"].get("seed", 42)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    torch.manual_seed(seed + local_rank)
+    np.random.seed(seed + local_rank)
 
     d_cfg   = cfg["data"]
     oe_cfg  = cfg["olmoearth"]
@@ -383,7 +415,13 @@ def main():
         load_pretrained_weights(encoder, predictor, ckpt_path, device,
                                 in_chans=cfg["model"]["in_chans"])
     else:
-        log.warning("No pretrained_checkpoint specified — training from scratch")
+        if rank0:
+            log.warning("No pretrained_checkpoint specified — training from scratch")
+
+    # ── DDP wrap (after weight loading so backbone attr is accessible) ────────
+    if is_ddp:
+        encoder   = DistributedDataParallel(encoder,   device_ids=[local_rank])
+        predictor = DistributedDataParallel(predictor, device_ids=[local_rank])
 
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     ema = opt_cfg["ema"][0]
@@ -400,13 +438,17 @@ def main():
                 "IterableDataset has no __len__. Set data.ipe in the config "
                 "(e.g. ipe: 17830 for 285288 samples / batch_size 16)."
             )
-        log.info(f"IterableDataset: using ipe={ipe} from config (data.ipe)")
+        if rank0:
+            log.info(f"IterableDataset: using ipe={ipe} from config (data.ipe)")
+    # Each rank sees 1/world_size of the shards, so effective steps/epoch shrinks.
+    ipe = max(1, ipe // world_size)
 
     # ── 3-stage training ──────────────────────────────────────────────────────
     global_epoch = 0
     for stage_name in ("stage1", "stage2", "stage3"):
         stage_cfg = opt_cfg[stage_name]
-        log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
+        if rank0:
+            log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
 
         set_freeze_stage(encoder, stage_cfg)
         optimizer, scheduler, wd_scheduler = build_optimizer(
@@ -421,21 +463,27 @@ def main():
                 ema_momentum=ema,
                 loss_exp=loss_exp,
                 epoch=global_epoch,
+                rank0=rank0,
             )
-            log.info(f"[{stage_name}] epoch {global_epoch:04d}  avg_loss={avg_loss:.4f}")
+            if rank0:
+                log.info(f"[{stage_name}] epoch {global_epoch:04d}  avg_loss={avg_loss:.4f}")
 
-            if global_epoch % save_freq == 0:
-                save_checkpoint(
-                    encoder, predictor, optimizer, global_epoch,
-                    folder / f"checkpoint_ep{global_epoch:04d}.pth",
-                )
+                if global_epoch % save_freq == 0:
+                    save_checkpoint(
+                        encoder, predictor, optimizer, global_epoch,
+                        folder / f"checkpoint_ep{global_epoch:04d}.pth",
+                    )
             global_epoch += 1
 
-    save_checkpoint(
-        encoder, predictor, optimizer, global_epoch,
-        folder / "checkpoint_final.pth",
-    )
-    log.info("Fine-tuning complete.")
+    if rank0:
+        save_checkpoint(
+            encoder, predictor, optimizer, global_epoch,
+            folder / "checkpoint_final.pth",
+        )
+        log.info("Fine-tuning complete.")
+
+    if is_ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
