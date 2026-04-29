@@ -4,13 +4,13 @@ app: vjepa_2_1_olmoearth
 nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
-folder: /your_folder/finetune_olmoearth/vitl.256px.12f
+folder: /home/baai/vjepa2/checkpoints
 
 # ── OLMo-Earth data (local TAR files) ────────────────────────────────────────
 olmoearth:
   # Glob pattern pointing to your locally downloaded TAR shards.
   # Download: https://hf-mirror.com/datasets/allenai/olmoearth_pretrain_dataset/tree/main/10_sentinel2_l2a_monthly
-  tar_path: "/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar"
+  tar_path: "/home/baai/mnt/*.tar"
 
   # 10_sentinel2_l2a_monthly = 10 m bands only: B02 B03 B04 B08
   # → 4 bands × 12 months = 48 channels per GeoTIFF.
@@ -24,7 +24,7 @@ olmoearth:
   max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
   shuffle_buffer: 1000
 
-pretrained_checkpoint: /your_checkpoints/vjepa2_vitl.pth
+pretrained_checkpoint: /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 data:
