@@ -40,6 +40,9 @@ from src.utils.schedulers import CosineWDSchedule, WarmupCosineSchedule
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+# Suppress rasterio's forwarding of GDAL CE_Warning (codec not in table, etc.)
+# These tiles are already caught by _process()'s try/except and skipped.
+logging.getLogger("rasterio").setLevel(logging.ERROR)
 
 # PyTorch 2.1.x has a bug in collate_tensor_fn: it passes element count (not byte
 # count) to untyped_storage()._new_shared(), allocating 4× too few bytes for float32,
