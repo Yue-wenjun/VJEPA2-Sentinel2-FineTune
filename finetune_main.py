@@ -394,17 +394,28 @@ def main():
     oe_cfg  = cfg["olmoearth"]
     opt_cfg = cfg["optimization"]
 
-    # Linear LR scaling: effective batch = batch_size × world_size.
-    # Applied once here so every stage inherits the scaled values.
+    # Per-stage LR scaling based on effective batch = batch_size × world_size.
+    # Stage1: linear (×N)  — patch_embed+doy_encoding are randomly initialised,
+    #                         far from optimum, can absorb aggressive LR.
+    # Stage2/3: sqrt (×√N) — pretrained backbone weights are near a good minimum;
+    #                         large LR overshoots and damages learnt representations.
     if world_size > 1:
-        for sname in ("stage1", "stage2", "stage3"):
+        stage_lr_scale = {
+            "stage1": float(world_size),          # linear: far from optimum
+            "stage2": world_size ** 0.5,           # sqrt:   pretrained blocks
+            "stage3": world_size ** 0.5,           # sqrt:   full fine-tune
+        }
+        for sname, scale in stage_lr_scale.items():
             s = opt_cfg[sname]
             for k in ("lr", "start_lr", "final_lr"):
                 if k in s:
-                    s[k] = s[k] * world_size
+                    s[k] = s[k] * scale
         if rank0:
-            log.info(f"LR linearly scaled ×{world_size} "
-                     f"(effective batch {d_cfg['batch_size'] * world_size})")
+            log.info(
+                f"LR scaled (effective batch {d_cfg['batch_size'] * world_size}): "
+                f"stage1 ×{world_size:.0f} (linear), "
+                f"stage2/3 ×{world_size**0.5:.2f} (sqrt)"
+            )
 
     # ── dataset + collator ────────────────────────────────────────────────────
     dataset = OLMoEarthDataset(
