@@ -271,6 +271,7 @@ def run_one_epoch(
     loss_exp: float,
     epoch: int,
     rank0: bool = True,
+    max_steps: int = None,
 ):
     encoder.train()
     predictor.train()
@@ -341,6 +342,8 @@ def run_one_epoch(
             n_batches += 1
             if rank0 and n_batches % 50 == 0:
                 log.info(f"  epoch {epoch:04d}  step {n_batches:5d}  loss={loss.item():.4f}")
+            if max_steps is not None and n_batches >= max_steps:
+                return total_loss / n_batches
 
     return total_loss / max(n_batches, 1)
 
@@ -409,6 +412,7 @@ def main():
         max_missing_frac=oe_cfg.get("max_missing_frac", 0.10),
         shuffle_buffer=oe_cfg.get("shuffle_buffer", 1000),
         seed=cfg["meta"].get("seed", 42),
+        repeat=is_ddp,   # cycle shards in DDP so all ranks reach max_steps together
     )
     log.info(f"Dataset: OLMoEarthDataset — {len(dataset.tar_files)} TAR shards")
 
@@ -503,6 +507,7 @@ def main():
                 loss_exp=loss_exp,
                 epoch=global_epoch,
                 rank0=rank0,
+                max_steps=ipe,   # hard cap: all DDP ranks stop at the same step
             )
 
             # Sync avg_loss across all ranks so every rank makes the identical
