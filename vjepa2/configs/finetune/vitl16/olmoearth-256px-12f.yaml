@@ -22,7 +22,7 @@ olmoearth:
   # Run: python -c "from data_pipeline.olmoearth_dataset import inspect_sample; inspect_sample('<tar_path>')"
   dn_scale: 10000.0
   max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
-  shuffle_buffer: 2000          # larger buffer smooths shard-cycling gaps on low-shard ranks
+  shuffle_buffer: 500           # keep small — large buffer stalls worker startup
 
 pretrained_checkpoint: /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
 
@@ -36,8 +36,6 @@ data:
   frames_per_clip: 12        # 12 fixed monthly composites
   tubelet_size: 2
   num_workers: 4
-  prefetch_factor: 4           # pre-queue 4 batches/worker; prevents GPU stall when
-                               # ranks with fewer shards (rank 5-7: 1 shard vs 2) cycle
   persistent_workers: true
   pin_mem: true
   # IterableDataset has no __len__; provide steps/epoch for LR scheduler.

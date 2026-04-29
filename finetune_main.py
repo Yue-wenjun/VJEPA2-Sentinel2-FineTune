@@ -446,7 +446,6 @@ def main():
         shuffle=False,       # IterableDataset: shuffling handled inside dataset
         drop_last=True,
         num_workers=num_workers,
-        prefetch_factor=d_cfg.get("prefetch_factor", 2) if num_workers > 0 else None,
         pin_memory=d_cfg.get("pin_mem", True),
         persistent_workers=(num_workers > 0),
     )
