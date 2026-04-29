@@ -22,7 +22,7 @@ olmoearth:
   # Run: python -c "from data_pipeline.olmoearth_dataset import inspect_sample; inspect_sample('<tar_path>')"
   dn_scale: 10000.0
   max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
-  shuffle_buffer: 1000
+  shuffle_buffer: 2000          # larger buffer smooths shard-cycling gaps on low-shard ranks
 
 pretrained_checkpoint: /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
 
@@ -36,6 +36,8 @@ data:
   frames_per_clip: 12        # 12 fixed monthly composites
   tubelet_size: 2
   num_workers: 4
+  prefetch_factor: 4           # pre-queue 4 batches/worker; prevents GPU stall when
+                               # ranks with fewer shards (rank 5-7: 1 shard vs 2) cycle
   persistent_workers: true
   pin_mem: true
   # IterableDataset has no __len__; provide steps/epoch for LR scheduler.
@@ -106,41 +108,43 @@ optimization:
     - 0.9995
 
   stage1:
-    epochs: 5                    # patch_embed+doy_encoding only; converges in ~1 epoch
-    lr: 1.0e-3                   # scaled ×world_size at runtime (e.g. 4e-3 for 4 GPUs)
+    epochs: 2
+    lr: 1.0e-3                   # scaled ×world_size (linear) at runtime
     start_lr: 1.0e-4
     final_lr: 1.0e-4
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 2
+    warmup: 1                    # 1-epoch warmup out of 2 total
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
-    early_stop_patience: 3       # advance if no improvement for 3 consecutive epochs
-    min_epochs_before_stop: 2    # skip warmup epochs before checking patience
+    early_stop_patience: 1       # advance after 1 epoch of no improvement
+    min_epochs_before_stop: 1
 
   stage2:
-    epochs: 30
-    lr: 5.0e-5
-    start_lr: 5.0e-5
+    epochs: 6
+    lr: 5.0e-5                   # scaled ×√world_size (sqrt) at runtime
+    start_lr: 5.0e-6
     final_lr: 1.0e-5
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 3
+    warmup: 2                    # 2-epoch warmup out of 6
     freeze_backbone: true
     unfreeze_last_n_blocks: 6
-    # early_stop_patience: 8    # uncomment to enable; stage2 needs more epochs to converge
+    early_stop_patience: 3       # advance if no improvement for 3 consecutive epochs
+    min_epochs_before_stop: 3
 
   stage3:
-    epochs: 50
-    lr: 1.0e-5
-    start_lr: 1.0e-5
+    epochs: 12
+    lr: 1.0e-5                   # scaled ×√world_size (sqrt) at runtime
+    start_lr: 1.0e-6
     final_lr: 1.0e-6
     weight_decay: 0.04
     final_weight_decay: 0.04
-    warmup: 0
+    warmup: 2
     freeze_backbone: false
     unfreeze_last_n_blocks: -1
-    # no early_stop_patience: stage3 is full fine-tune; let the cosine schedule complete
+    early_stop_patience: 4       # stop early if plateau; stage3 can be cut short safely
+    min_epochs_before_stop: 6
 
 # ── Logging / checkpointing ───────────────────────────────────────────────────
 meta:
