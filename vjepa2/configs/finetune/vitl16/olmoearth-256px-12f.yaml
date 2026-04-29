@@ -105,15 +105,17 @@ optimization:
     - 0.9995
 
   stage1:
-    epochs: 20
-    lr: 1.0e-3
+    epochs: 5                    # patch_embed+doy_encoding only; converges in ~1 epoch
+    lr: 1.0e-3                   # scaled ×world_size at runtime (e.g. 4e-3 for 4 GPUs)
     start_lr: 1.0e-4
     final_lr: 1.0e-4
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 5
+    warmup: 2
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
+    early_stop_patience: 3       # advance if no improvement for 3 consecutive epochs
+    min_epochs_before_stop: 2    # skip warmup epochs before checking patience
 
   stage2:
     epochs: 30
@@ -123,8 +125,9 @@ optimization:
     weight_decay: 0.05
     final_weight_decay: 0.05
     warmup: 3
-    freeze_backbone: true     # freeze all, selectively unfreeze last n blocks
+    freeze_backbone: true
     unfreeze_last_n_blocks: 6
+    # early_stop_patience: 8    # uncomment to enable; stage2 needs more epochs to converge
 
   stage3:
     epochs: 50
@@ -136,6 +139,7 @@ optimization:
     warmup: 0
     freeze_backbone: false
     unfreeze_last_n_blocks: -1
+    # no early_stop_patience: stage3 is full fine-tune; let the cosine schedule complete
 
 # ── Logging / checkpointing ───────────────────────────────────────────────────
 meta:

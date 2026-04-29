@@ -135,6 +135,21 @@ def _backbone(model):
     return m.backbone
 
 
+def _make_ddp(enc, pred, local_rank, find_unused):
+    """(Re-)wrap encoder and predictor in DDP; rebuilt at each stage so that
+    find_unused_parameters can be turned off once all params are trainable."""
+    raw_enc  = enc.module  if hasattr(enc,  "module") else enc
+    raw_pred = pred.module if hasattr(pred, "module") else pred
+    return (
+        DistributedDataParallel(raw_enc,  device_ids=[local_rank],
+                                find_unused_parameters=find_unused,
+                                gradient_as_bucket_view=True),
+        DistributedDataParallel(raw_pred, device_ids=[local_rank],
+                                find_unused_parameters=find_unused,
+                                gradient_as_bucket_view=True),
+    )
+
+
 def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.device, in_chans: int = 6):
     """
     Load V-JEPA 2.1 pretrained weights.
@@ -371,6 +386,18 @@ def main():
     oe_cfg  = cfg["olmoearth"]
     opt_cfg = cfg["optimization"]
 
+    # Linear LR scaling: effective batch = batch_size × world_size.
+    # Applied once here so every stage inherits the scaled values.
+    if world_size > 1:
+        for sname in ("stage1", "stage2", "stage3"):
+            s = opt_cfg[sname]
+            for k in ("lr", "start_lr", "final_lr"):
+                if k in s:
+                    s[k] = s[k] * world_size
+        if rank0:
+            log.info(f"LR linearly scaled ×{world_size} "
+                     f"(effective batch {d_cfg['batch_size'] * world_size})")
+
     # ── dataset + collator ────────────────────────────────────────────────────
     dataset = OLMoEarthDataset(
         tar_path=oe_cfg["tar_path"],
@@ -418,14 +445,6 @@ def main():
         if rank0:
             log.warning("No pretrained_checkpoint specified — training from scratch")
 
-    # ── DDP wrap (after weight loading so backbone attr is accessible) ────────
-    if is_ddp:
-        # find_unused_parameters=True is required because Stage 1 freezes backbone
-        # params, which never receive gradients and would otherwise trigger DDP's
-        # "reduction not finished" check.
-        encoder   = DistributedDataParallel(encoder,   device_ids=[local_rank], find_unused_parameters=True)
-        predictor = DistributedDataParallel(predictor, device_ids=[local_rank], find_unused_parameters=True)
-
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     ema = opt_cfg["ema"][0]
     loss_exp = cfg["loss"].get("loss_exp", 1.0)
@@ -454,11 +473,27 @@ def main():
             log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
 
         set_freeze_stage(encoder, stage_cfg)
+
+        # Rebuild DDP at each stage: turn off find_unused_parameters once the
+        # backbone is fully unfrozen (Stage 3) to eliminate the per-step scan overhead.
+        if is_ddp:
+            freeze = stage_cfg.get("freeze_backbone", False)
+            encoder, predictor = _make_ddp(encoder, predictor, local_rank, find_unused=freeze)
+
         optimizer, scheduler, wd_scheduler = build_optimizer(
             encoder, predictor, stage_cfg, ipe=ipe
         )
 
-        for _ in range(stage_cfg["epochs"]):
+        # Per-stage early advancement: advance to next stage if loss stops improving.
+        # Controlled by optional YAML keys per stage:
+        #   early_stop_patience: N    (epochs without improvement before advancing)
+        #   min_epochs_before_stop: M (don't check before epoch M, protects warmup)
+        patience   = stage_cfg.get("early_stop_patience", None)
+        min_ep     = stage_cfg.get("min_epochs_before_stop", 1)
+        best_loss_s = float("inf")
+        no_improve  = 0
+
+        for ep_idx in range(stage_cfg["epochs"]):
             avg_loss = run_one_epoch(
                 encoder, predictor, target_encoder,
                 loader, optimizer, scheduler, wd_scheduler,
@@ -468,15 +503,35 @@ def main():
                 epoch=global_epoch,
                 rank0=rank0,
             )
+
+            # Sync avg_loss across all ranks so every rank makes the identical
+            # patience decision — avoids deadlock where rank0 breaks but others wait.
+            if is_ddp:
+                _lt = torch.tensor(avg_loss, device=device)
+                dist.all_reduce(_lt, op=dist.ReduceOp.AVG)
+                avg_loss = _lt.item()
+
             if rank0:
                 log.info(f"[{stage_name}] epoch {global_epoch:04d}  avg_loss={avg_loss:.4f}")
-
                 if global_epoch % save_freq == 0:
                     save_checkpoint(
                         encoder, predictor, optimizer, global_epoch,
                         folder / f"checkpoint_ep{global_epoch:04d}.pth",
                     )
             global_epoch += 1
+
+            # Patience check (all ranks run identical logic → break together).
+            if patience is not None and ep_idx >= min_ep - 1:
+                if avg_loss < best_loss_s - 1e-4:
+                    best_loss_s = avg_loss
+                    no_improve  = 0
+                else:
+                    no_improve += 1
+                if no_improve >= patience:
+                    if rank0:
+                        log.info(f"[{stage_name}] early advance: no improvement "
+                                 f"for {no_improve} consecutive epochs")
+                    break
 
     if rank0:
         save_checkpoint(
