@@ -96,6 +96,7 @@ def build_model(cfg: dict, device: torch.device):
         num_heads=m.get("pred_num_heads", 12),
         uniform_power=m.get("uniform_power", True),
         use_mask_tokens=m.get("use_mask_tokens", True),
+        num_mask_tokens=m.get("num_mask_tokens", 1),
         zero_init_mask_tokens=m.get("zero_init_mask_tokens", True),
         use_rope=m.get("use_rope", False),
         use_sdpa=m.get("use_sdpa", True),

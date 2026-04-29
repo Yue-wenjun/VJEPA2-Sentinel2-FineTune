@@ -94,6 +94,7 @@ model:
   n_registers: 0
   n_registers_predictor: 0
   use_mask_tokens: true
+  num_mask_tokens: 1         # equals len(dataset_fpcs)=1; prevents unused mask_tokens[1]
   zero_init_mask_tokens: true
   use_activation_checkpointing: false
   use_sdpa: true
