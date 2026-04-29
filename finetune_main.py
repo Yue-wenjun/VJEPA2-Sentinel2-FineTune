@@ -135,17 +135,18 @@ def _backbone(model):
     return m.backbone
 
 
-def _make_ddp(enc, pred, local_rank, find_unused):
-    """(Re-)wrap encoder and predictor in DDP; rebuilt at each stage so that
-    find_unused_parameters can be turned off once all params are trainable."""
+def _make_ddp(enc, pred, local_rank):
+    """(Re-)wrap encoder and predictor in DDP after each stage's freeze/unfreeze.
+    Building DDP after set_freeze_stage means the reducer only registers params
+    with requires_grad=True, so find_unused_parameters=False is always safe."""
     raw_enc  = enc.module  if hasattr(enc,  "module") else enc
     raw_pred = pred.module if hasattr(pred, "module") else pred
     return (
         DistributedDataParallel(raw_enc,  device_ids=[local_rank],
-                                find_unused_parameters=find_unused,
+                                find_unused_parameters=False,
                                 gradient_as_bucket_view=True),
         DistributedDataParallel(raw_pred, device_ids=[local_rank],
-                                find_unused_parameters=find_unused,
+                                find_unused_parameters=False,
                                 gradient_as_bucket_view=True),
     )
 
@@ -474,11 +475,10 @@ def main():
 
         set_freeze_stage(encoder, stage_cfg)
 
-        # Rebuild DDP at each stage: turn off find_unused_parameters once the
-        # backbone is fully unfrozen (Stage 3) to eliminate the per-step scan overhead.
+        # Rebuild DDP after each freeze/unfreeze so the reducer's bucket list
+        # exactly matches the currently trainable parameters.
         if is_ddp:
-            freeze = stage_cfg.get("freeze_backbone", False)
-            encoder, predictor = _make_ddp(encoder, predictor, local_rank, find_unused=freeze)
+            encoder, predictor = _make_ddp(encoder, predictor, local_rank)
 
         optimizer, scheduler, wd_scheduler = build_optimizer(
             encoder, predictor, stage_cfg, ipe=ipe
