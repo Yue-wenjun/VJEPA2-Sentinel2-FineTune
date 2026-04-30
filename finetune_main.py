@@ -15,13 +15,16 @@ Pipeline:
 import argparse
 import copy
 import logging
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import yaml
+from torch.nn.parallel import DistributedDataParallel
 
 sys.path.insert(0, str(Path(__file__).parent / "vjepa2"))
 
@@ -37,6 +40,22 @@ from src.utils.schedulers import CosineWDSchedule, WarmupCosineSchedule
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+# Suppress rasterio's forwarding of GDAL CE_Warning (codec not in table, etc.)
+# These tiles are already caught by _process()'s try/except and skipped.
+logging.getLogger("rasterio").setLevel(logging.ERROR)
+
+# PyTorch 2.1.x has a bug in collate_tensor_fn: it passes element count (not byte
+# count) to untyped_storage()._new_shared(), allocating 4× too few bytes for float32,
+# then calls resize_() on the resulting non-resizable file-backed shared memory.
+# Fix: replace the pre-allocation path with a plain torch.stack (same result, no shm).
+try:
+    import torch.utils.data._utils.collate as _pt_collate
+    if torch.Tensor in _pt_collate.default_collate_fn_map:
+        _pt_collate.default_collate_fn_map[torch.Tensor] = (
+            lambda batch, **_: torch.stack(batch, 0)
+        )
+except Exception:
+    pass
 
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -80,6 +99,7 @@ def build_model(cfg: dict, device: torch.device):
         num_heads=m.get("pred_num_heads", 12),
         uniform_power=m.get("uniform_power", True),
         use_mask_tokens=m.get("use_mask_tokens", True),
+        num_mask_tokens=m.get("num_mask_tokens", 1),
         zero_init_mask_tokens=m.get("zero_init_mask_tokens", True),
         use_rope=m.get("use_rope", False),
         use_sdpa=m.get("use_sdpa", True),
@@ -111,6 +131,28 @@ def _safe_load(module: nn.Module, state_dict: dict):
     compatible = {k: v for k, v in state_dict.items()
                   if k not in own or own[k].shape == v.shape}
     return module.load_state_dict(compatible, strict=False)
+
+
+def _backbone(model):
+    """Unwrap DDP wrapper and return the .backbone module."""
+    m = model.module if hasattr(model, "module") else model
+    return m.backbone
+
+
+def _make_ddp(enc, pred, local_rank):
+    """(Re-)wrap encoder and predictor in DDP after each stage's freeze/unfreeze.
+    Building DDP after set_freeze_stage means the reducer only registers params
+    with requires_grad=True, so find_unused_parameters=False is always safe."""
+    raw_enc  = enc.module  if hasattr(enc,  "module") else enc
+    raw_pred = pred.module if hasattr(pred, "module") else pred
+    return (
+        DistributedDataParallel(raw_enc,  device_ids=[local_rank],
+                                find_unused_parameters=False,
+                                gradient_as_bucket_view=True),
+        DistributedDataParallel(raw_pred, device_ids=[local_rank],
+                                find_unused_parameters=False,
+                                gradient_as_bucket_view=True),
+    )
 
 
 def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.device, in_chans: int = 6):
@@ -159,7 +201,7 @@ def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.de
 def set_freeze_stage(encoder, stage_cfg: dict):
     freeze = stage_cfg.get("freeze_backbone", False)
     n_unfreeze = stage_cfg.get("unfreeze_last_n_blocks", -1)
-    backbone = encoder.backbone
+    backbone = _backbone(encoder)
 
     for p in backbone.parameters():
         p.requires_grad = not freeze
@@ -183,25 +225,82 @@ def set_freeze_stage(encoder, stage_cfg: dict):
 
 # ── optimizer ─────────────────────────────────────────────────────────────────
 
+def _llrd_groups(backbone, base_lr: float, decay: float, weight_decay: float) -> list[dict]:
+    """
+    Build per-layer AdamW parameter groups with layer-wise LR decay.
+
+    Last transformer block → lr_scale=1.0 (full base_lr).
+    Each block going toward input → lr_scale multiplied by `decay`.
+    patch_embed / doy_encoding / norm → lr_scale=1.0 (randomly initialised, needs full LR).
+
+    The WarmupCosineSchedule reads group["lr_scale"] and applies it each step,
+    so the cosine curve shape is preserved at every layer's effective LR.
+    """
+    blocks = backbone.blocks
+    n = len(blocks)
+
+    # Params NOT belonging to any transformer block (patch_embed, doy_encoding, norm, …)
+    block_ids = {id(p) for blk in blocks for p in blk.parameters()}
+    other_wd, other_nowd = [], []
+    for name, p in backbone.named_parameters():
+        if not p.requires_grad or id(p) in block_ids:
+            continue
+        (other_nowd if ("bias" in name or p.ndim == 1) else other_wd).append(p)
+
+    groups = []
+    if other_wd:
+        groups.append({"params": other_wd,   "lr": base_lr, "lr_scale": 1.0, "weight_decay": weight_decay})
+    if other_nowd:
+        groups.append({"params": other_nowd, "lr": base_lr, "lr_scale": 1.0, "weight_decay": 0.0})
+
+    for i, blk in enumerate(blocks):
+        scale = decay ** (n - 1 - i)   # block 0 → scale≈0; block n-1 → scale=1
+        blk_lr = base_lr * scale
+        wd_p  = [p for nm, p in blk.named_parameters() if p.requires_grad and "bias" not in nm and p.ndim != 1]
+        nwd_p = [p for nm, p in blk.named_parameters() if p.requires_grad and ("bias" in nm or p.ndim == 1)]
+        if wd_p:
+            groups.append({"params": wd_p,  "lr": blk_lr, "lr_scale": scale, "weight_decay": weight_decay})
+        if nwd_p:
+            groups.append({"params": nwd_p, "lr": blk_lr, "lr_scale": scale, "weight_decay": 0.0})
+
+    return groups
+
+
 def build_optimizer(encoder, predictor, stage_cfg: dict, ipe: int):
     lr = stage_cfg["lr"]
     epochs = stage_cfg["epochs"]
+    weight_decay = stage_cfg.get("weight_decay", 0.05)
+    llrd = stage_cfg.get("llrd_decay", 1.0)
 
-    def _split(model):
-        wd_params = [p for n, p in model.named_parameters()
-                     if p.requires_grad and "bias" not in n and p.ndim != 1]
-        no_wd = [p for n, p in model.named_parameters()
-                 if p.requires_grad and ("bias" in n or p.ndim == 1)]
-        return wd_params, no_wd
+    if llrd < 1.0:
+        # LLRD for encoder blocks; predictor always gets full LR (shallow, fast-adapting)
+        groups = _llrd_groups(_backbone(encoder), lr, llrd, weight_decay)
+        pred_wd  = [p for n, p in predictor.named_parameters()
+                    if p.requires_grad and "bias" not in n and p.ndim != 1]
+        pred_nwd = [p for n, p in predictor.named_parameters()
+                    if p.requires_grad and ("bias" in n or p.ndim == 1)]
+        if pred_wd:
+            groups.append({"params": pred_wd,  "lr": lr, "lr_scale": 1.0, "weight_decay": weight_decay})
+        if pred_nwd:
+            groups.append({"params": pred_nwd, "lr": lr, "lr_scale": 1.0, "weight_decay": 0.0})
+    else:
+        def _split(model):
+            wd  = [p for n, p in model.named_parameters()
+                   if p.requires_grad and "bias" not in n and p.ndim != 1]
+            nwd = [p for n, p in model.named_parameters()
+                   if p.requires_grad and ("bias" in n or p.ndim == 1)]
+            return wd, nwd
+        enc_wd, enc_nowd = _split(encoder)
+        pred_wd, pred_nowd = _split(predictor)
+        groups = [
+            {"params": enc_wd  + pred_wd,  "lr": lr, "weight_decay": weight_decay},
+            {"params": enc_nowd + pred_nowd, "lr": lr, "weight_decay": 0.0},
+        ]
 
-    enc_wd, enc_nowd = _split(encoder)
-    pred_wd, pred_nowd = _split(predictor)
-
-    optimizer = torch.optim.AdamW([
-        {"params": enc_wd + pred_wd},
-        {"params": enc_nowd + pred_nowd, "weight_decay": 0},
-    ], lr=lr, betas=(0.9, 0.999), eps=1e-8,
-       weight_decay=stage_cfg.get("weight_decay", 0.05))
+    optimizer = torch.optim.AdamW(
+        groups, lr=lr, betas=(0.9, 0.999), eps=1e-8,
+        weight_decay=weight_decay,
+    )
 
     T = epochs * ipe
     scheduler = WarmupCosineSchedule(
@@ -231,6 +330,8 @@ def run_one_epoch(
     ema_momentum: float,
     loss_exp: float,
     epoch: int,
+    rank0: bool = True,
+    max_steps: int = None,
 ):
     encoder.train()
     predictor.train()
@@ -299,21 +400,26 @@ def run_one_epoch(
 
             total_loss += loss.item()
             n_batches += 1
-            if n_batches % 50 == 0:
+            if rank0 and n_batches % 50 == 0:
                 log.info(f"  epoch {epoch:04d}  step {n_batches:5d}  loss={loss.item():.4f}")
+            if max_steps is not None and n_batches >= max_steps:
+                return total_loss / n_batches
 
     return total_loss / max(n_batches, 1)
 
 
 # ── checkpoint ────────────────────────────────────────────────────────────────
 
-def save_checkpoint(encoder, predictor, optimizer, epoch, path):
-    torch.save({
+def save_checkpoint(encoder, predictor, optimizer, epoch, path, extra: dict | None = None):
+    ckpt = {
         "epoch": epoch,
-        "encoder": encoder.backbone.state_dict(),
-        "predictor": predictor.backbone.state_dict(),
-        "opt": optimizer.state_dict(),
-    }, path)
+        "encoder":   _backbone(encoder).state_dict(),
+        "predictor": _backbone(predictor).state_dict(),
+        "opt":       optimizer.state_dict(),
+    }
+    if extra:
+        ckpt.update(extra)
+    torch.save(ckpt, path)
     log.info(f"Saved → {path}")
 
 
@@ -322,22 +428,54 @@ def save_checkpoint(encoder, predictor, optimizer, epoch, path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
+    # ── DDP init ──────────────────────────────────────────────────────────────
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_ddp = world_size > 1
+    if is_ddp:
+        dist.init_process_group("nccl")
+        torch.cuda.set_device(local_rank)
+    rank0 = (local_rank == 0)
+
     cfg = load_config(args.config)
-    device = torch.device(args.device)
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if cfg["meta"].get("dtype") == "bfloat16" else torch.float32
     folder = Path(cfg["folder"])
-    folder.mkdir(parents=True, exist_ok=True)
+    if rank0:
+        folder.mkdir(parents=True, exist_ok=True)
 
     seed = cfg["meta"].get("seed", 42)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    torch.manual_seed(seed + local_rank)
+    np.random.seed(seed + local_rank)
 
     d_cfg   = cfg["data"]
     oe_cfg  = cfg["olmoearth"]
     opt_cfg = cfg["optimization"]
+
+    # Per-stage LR scaling based on effective batch = batch_size × world_size.
+    # Stage1: linear (×N)  — patch_embed+doy_encoding are randomly initialised,
+    #                         far from optimum, can absorb aggressive LR.
+    # Stage2/3: sqrt (×√N) — pretrained backbone weights are near a good minimum;
+    #                         large LR overshoots and damages learnt representations.
+    if world_size > 1:
+        stage_lr_scale = {
+            "stage1": float(world_size),          # linear: far from optimum
+            "stage2": world_size ** 0.5,           # sqrt:   pretrained blocks
+            "stage3": world_size ** 0.5,           # sqrt:   full fine-tune
+        }
+        for sname, scale in stage_lr_scale.items():
+            s = opt_cfg[sname]
+            for k in ("lr", "start_lr", "final_lr"):
+                if k in s:
+                    s[k] = s[k] * scale
+        if rank0:
+            log.info(
+                f"LR scaled (effective batch {d_cfg['batch_size'] * world_size}): "
+                f"stage1 ×{world_size:.0f} (linear), "
+                f"stage2/3 ×{world_size**0.5:.2f} (sqrt)"
+            )
 
     # ── dataset + collator ────────────────────────────────────────────────────
     dataset = OLMoEarthDataset(
@@ -348,6 +486,7 @@ def main():
         max_missing_frac=oe_cfg.get("max_missing_frac", 0.10),
         shuffle_buffer=oe_cfg.get("shuffle_buffer", 1000),
         seed=cfg["meta"].get("seed", 42),
+        repeat=is_ddp,   # cycle shards in DDP so all ranks reach max_steps together
     )
     log.info(f"Dataset: OLMoEarthDataset — {len(dataset.tar_files)} TAR shards")
 
@@ -383,7 +522,29 @@ def main():
         load_pretrained_weights(encoder, predictor, ckpt_path, device,
                                 in_chans=cfg["model"]["in_chans"])
     else:
-        log.warning("No pretrained_checkpoint specified — training from scratch")
+        if rank0:
+            log.warning("No pretrained_checkpoint specified — training from scratch")
+
+    # ── resume from a previous fine-tune run ──────────────────────────────────
+    # Set meta.load_checkpoint: true  and  meta.read_checkpoint: /path/to/ckpt.pth
+    # The checkpoint must have been saved by this script (contains stage/ep_idx).
+    resume_ckpt = None
+    resume_path = cfg["meta"].get("read_checkpoint")
+    if cfg["meta"].get("load_checkpoint") and resume_path:
+        if rank0:
+            log.info(f"Loading resume checkpoint: {resume_path}")
+        resume_ckpt = torch.load(resume_path, map_location="cpu")
+        _safe_load(encoder.backbone,   resume_ckpt["encoder"])
+        _safe_load(predictor.backbone, resume_ckpt.get("predictor", {}))
+        # Sync EMA target encoder to restored encoder weights.
+        target_encoder.load_state_dict(
+            {k: v for k, v in encoder.state_dict().items()}, strict=False)
+        if rank0:
+            log.info(
+                f"  Resumed: stage={resume_ckpt.get('stage')}  "
+                f"ep_idx={resume_ckpt.get('ep_idx')}  "
+                f"epoch={resume_ckpt.get('epoch')}"
+            )
 
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     ema = opt_cfg["ema"][0]
@@ -400,20 +561,68 @@ def main():
                 "IterableDataset has no __len__. Set data.ipe in the config "
                 "(e.g. ipe: 17830 for 285288 samples / batch_size 16)."
             )
-        log.info(f"IterableDataset: using ipe={ipe} from config (data.ipe)")
+        if rank0:
+            log.info(f"IterableDataset: using ipe={ipe} from config (data.ipe)")
+    # Each rank sees 1/world_size of the shards, so effective steps/epoch shrinks.
+    ipe = max(1, ipe // world_size)
 
     # ── 3-stage training ──────────────────────────────────────────────────────
+    STAGES = ("stage1", "stage2", "stage3")
+    STAGE_ORDER = {s: i for i, s in enumerate(STAGES)}
+
     global_epoch = 0
-    for stage_name in ("stage1", "stage2", "stage3"):
+    for stage_name in STAGES:
         stage_cfg = opt_cfg[stage_name]
-        log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
+
+        # Skip stages that were already completed in a previous run.
+        if resume_ckpt is not None:
+            resume_stage = resume_ckpt.get("stage", "stage1")
+            if STAGE_ORDER[stage_name] < STAGE_ORDER[resume_stage]:
+                if rank0:
+                    log.info(f"  Skipping {stage_name} (already completed in checkpoint)")
+                continue
+
+        if rank0:
+            log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
 
         set_freeze_stage(encoder, stage_cfg)
+
+        # Rebuild DDP after each freeze/unfreeze so the reducer's bucket list
+        # exactly matches the currently trainable parameters.
+        if is_ddp:
+            encoder, predictor = _make_ddp(encoder, predictor, local_rank)
+
         optimizer, scheduler, wd_scheduler = build_optimizer(
             encoder, predictor, stage_cfg, ipe=ipe
         )
 
-        for _ in range(stage_cfg["epochs"]):
+        # Per-stage early advancement: advance to next stage if loss stops improving.
+        # Controlled by optional YAML keys per stage:
+        #   early_stop_patience: N    (epochs without improvement before advancing)
+        #   min_epochs_before_stop: M (don't check before epoch M, protects warmup)
+        patience    = stage_cfg.get("early_stop_patience", None)
+        min_ep      = stage_cfg.get("min_epochs_before_stop", 1)
+        best_loss_s    = float("inf")
+        best_ep_global = global_epoch   # epoch index of best checkpoint this stage
+        no_improve     = 0
+        start_ep       = 0
+
+        # Restore training state when resuming mid-stage.
+        if resume_ckpt is not None and resume_ckpt.get("stage") == stage_name:
+            optimizer.load_state_dict(resume_ckpt["opt"])
+            if "scheduler"    in resume_ckpt: scheduler.load_state_dict(resume_ckpt["scheduler"])
+            if "wd_scheduler" in resume_ckpt: wd_scheduler.load_state_dict(resume_ckpt["wd_scheduler"])
+            if "scaler"       in resume_ckpt: scaler.load_state_dict(resume_ckpt["scaler"])
+            global_epoch   = resume_ckpt["epoch"] + 1
+            start_ep       = resume_ckpt.get("ep_idx", 0) + 1
+            best_loss_s    = resume_ckpt.get("best_loss_s", float("inf"))
+            best_ep_global = resume_ckpt.get("best_ep_global", global_epoch)
+            no_improve     = resume_ckpt.get("no_improve", 0)
+            resume_ckpt    = None   # consumed; don't restore again in later stages
+            if rank0:
+                log.info(f"  Restored: global_epoch={global_epoch}  start_ep={start_ep}")
+
+        for ep_idx in range(start_ep, stage_cfg["epochs"]):
             avg_loss = run_one_epoch(
                 encoder, predictor, target_encoder,
                 loader, optimizer, scheduler, wd_scheduler,
@@ -421,21 +630,93 @@ def main():
                 ema_momentum=ema,
                 loss_exp=loss_exp,
                 epoch=global_epoch,
+                rank0=rank0,
+                max_steps=ipe,   # hard cap: all DDP ranks stop at the same step
             )
-            log.info(f"[{stage_name}] epoch {global_epoch:04d}  avg_loss={avg_loss:.4f}")
 
-            if global_epoch % save_freq == 0:
-                save_checkpoint(
-                    encoder, predictor, optimizer, global_epoch,
-                    folder / f"checkpoint_ep{global_epoch:04d}.pth",
-                )
+            # Sync avg_loss across all ranks so every rank makes the identical
+            # patience decision — avoids deadlock where rank0 breaks but others wait.
+            if is_ddp:
+                _lt = torch.tensor(avg_loss, device=device)
+                dist.all_reduce(_lt, op=dist.ReduceOp.AVG)
+                avg_loss = _lt.item()
+
+            # Track best epoch (all ranks agree since avg_loss is synced).
+            if avg_loss < best_loss_s - 1e-4:
+                best_loss_s    = avg_loss
+                best_ep_global = global_epoch
+                no_improve     = 0
+            else:
+                no_improve += 1
+
+            if rank0:
+                log.info(f"[{stage_name}] epoch {global_epoch:04d}  avg_loss={avg_loss:.4f}"
+                         f"  {'★ best' if global_epoch == best_ep_global else ''}")
+                # Save every epoch so a disconnect never loses more than one epoch.
+                if global_epoch % save_freq == 0:
+                    save_checkpoint(
+                        encoder, predictor, optimizer, global_epoch,
+                        folder / f"checkpoint_ep{global_epoch:04d}.pth",
+                        extra={
+                            "stage":          stage_name,
+                            "ep_idx":         ep_idx,
+                            "best_loss_s":    best_loss_s,
+                            "best_ep_global": best_ep_global,
+                            "no_improve":     no_improve,
+                            "scheduler":      scheduler.state_dict(),
+                            "wd_scheduler":   wd_scheduler.state_dict(),
+                            "scaler":         scaler.state_dict(),
+                        },
+                    )
             global_epoch += 1
 
-    save_checkpoint(
-        encoder, predictor, optimizer, global_epoch,
-        folder / "checkpoint_final.pth",
-    )
-    log.info("Fine-tuning complete.")
+            # Patience-based early stage advance (all ranks break together).
+            if patience is not None and ep_idx >= min_ep - 1:
+                if no_improve >= patience:
+                    if rank0:
+                        log.info(f"[{stage_name}] early advance: no improvement "
+                                 f"for {no_improve} consecutive epochs")
+                    break
+
+        # ── Best-of-stage restore ─────────────────────────────────────────────
+        # Before entering the next stage, reload the encoder/predictor weights
+        # from the epoch with the lowest loss in this stage.
+        if is_ddp:
+            dist.barrier()   # ensure rank0 has finished writing before all ranks read
+        best_path = folder / f"checkpoint_ep{best_ep_global:04d}.pth"
+        if best_path.exists():
+            _bc = torch.load(best_path, map_location="cpu")
+            raw_enc  = encoder.module  if hasattr(encoder,  "module") else encoder
+            raw_pred = predictor.module if hasattr(predictor, "module") else predictor
+            _safe_load(raw_enc.backbone,  _bc["encoder"])
+            _safe_load(raw_pred.backbone, _bc.get("predictor", {}))
+            with torch.no_grad():
+                for _pt, _ps in zip(target_encoder.parameters(), raw_enc.parameters()):
+                    _pt.data.copy_(_ps.data)
+            if rank0:
+                if stage_name == STAGES[-1]:
+                    log.info(f"  [{stage_name}] best ep {best_ep_global} "
+                             f"(loss={best_loss_s:.4f}) → will be saved as checkpoint_final.pth")
+                else:
+                    log.info(f"  [{stage_name}] restored best ep {best_ep_global} "
+                             f"(loss={best_loss_s:.4f}) → entering next stage")
+
+    if rank0:
+        save_checkpoint(
+            encoder, predictor, optimizer, global_epoch,
+            folder / "checkpoint_final.pth",
+            extra={"best_ep_global": best_ep_global, "best_loss": best_loss_s},
+        )
+        log.info(
+            f"Fine-tuning complete.\n"
+            f"  Best stage3 epoch : {best_ep_global}  (loss={best_loss_s:.4f})\n"
+            f"  Final checkpoint  : {folder}/checkpoint_final.pth\n"
+            f"  Visualize : python visualize.py --checkpoint {folder}/checkpoint_final.pth\n"
+            f"  Evaluate  : python linear_probe.py --checkpoint {folder}/checkpoint_final.pth"
+        )
+
+    if is_ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

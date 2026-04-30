@@ -4,13 +4,13 @@ app: vjepa_2_1_olmoearth
 nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
-folder: /your_folder/finetune_olmoearth/vitl.256px.12f
+folder: /home/baai/vjepa2/checkpoints
 
 # ── OLMo-Earth data (local TAR files) ────────────────────────────────────────
 olmoearth:
   # Glob pattern pointing to your locally downloaded TAR shards.
   # Download: https://hf-mirror.com/datasets/allenai/olmoearth_pretrain_dataset/tree/main/10_sentinel2_l2a_monthly
-  tar_path: "/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar"
+  tar_path: "/home/baai/mnt/*.tar"
 
   # 10_sentinel2_l2a_monthly = 10 m bands only: B02 B03 B04 B08
   # → 4 bands × 12 months = 48 channels per GeoTIFF.
@@ -22,9 +22,9 @@ olmoearth:
   # Run: python -c "from data_pipeline.olmoearth_dataset import inspect_sample; inspect_sample('<tar_path>')"
   dn_scale: 10000.0
   max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
-  shuffle_buffer: 1000
+  shuffle_buffer: 500           # keep small — large buffer stalls worker startup
 
-pretrained_checkpoint: /your_checkpoints/vjepa2_vitl.pth
+pretrained_checkpoint: /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 data:
@@ -39,8 +39,10 @@ data:
   persistent_workers: true
   pin_mem: true
   # IterableDataset has no __len__; provide steps/epoch for LR scheduler.
-  # Estimate: 285,288 samples / batch_size 16 ≈ 17,830 steps/epoch.
-  ipe: 17830
+  # 12 shards × ~15,810 samples/shard = ~189,720 samples total.
+  # ipe = 189,720 / batch_size 16 = 11,857  (code then divides by world_size per rank).
+  # ipe: 17830
+  ipe: 12845
 
 # ── Mask collator (same format as V-JEPA 2.1 pretraining) ────────────────────
 mask:
@@ -94,6 +96,7 @@ model:
   n_registers: 0
   n_registers_predictor: 0
   use_mask_tokens: true
+  num_mask_tokens: 1         # equals len(dataset_fpcs)=1; prevents unused mask_tokens[1]
   zero_init_mask_tokens: true
   use_activation_checkpointing: false
   use_sdpa: true
@@ -105,43 +108,51 @@ optimization:
     - 0.9995
 
   stage1:
-    epochs: 20
-    lr: 1.0e-3
+    epochs: 3
+    lr: 1.0e-3                   # scaled ×world_size (linear) at runtime
     start_lr: 1.0e-4
     final_lr: 1.0e-4
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 5
+    warmup: 1                    # 1-epoch warmup out of 3 total
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
+    early_stop_patience: 2       # advance after 2 epochs of no improvement
+    min_epochs_before_stop: 2
 
   stage2:
-    epochs: 30
-    lr: 5.0e-5
-    start_lr: 5.0e-5
+    epochs: 6
+    lr: 5.0e-5                   # scaled ×√world_size (sqrt) at runtime
+    start_lr: 5.0e-6
     final_lr: 1.0e-5
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 3
-    freeze_backbone: true     # freeze all, selectively unfreeze last n blocks
+    warmup: 2                    # 2-epoch warmup out of 6
+    freeze_backbone: true
     unfreeze_last_n_blocks: 6
+    llrd_decay: 0.75             # last block ×1.0, each block earlier ×0.75
+    early_stop_patience: 3       # advance if no improvement for 3 consecutive epochs
+    min_epochs_before_stop: 3
 
   stage3:
-    epochs: 50
-    lr: 1.0e-5
-    start_lr: 1.0e-5
+    epochs: 12
+    lr: 1.0e-5                   # scaled ×√world_size (sqrt) at runtime
+    start_lr: 1.0e-6
     final_lr: 1.0e-6
     weight_decay: 0.04
     final_weight_decay: 0.04
-    warmup: 0
+    warmup: 2
     freeze_backbone: false
     unfreeze_last_n_blocks: -1
+    llrd_decay: 0.75             # full unfreeze — LLRD protects early layers from large LR
+    early_stop_patience: 4       # stop early if plateau; stage3 can be cut short safely
+    min_epochs_before_stop: 6
 
 # ── Logging / checkpointing ───────────────────────────────────────────────────
 meta:
   dtype: bfloat16
   seed: 42
-  save_every_freq: 10
+  save_every_freq: 1
   load_checkpoint: false
   read_checkpoint: null
   use_sdpa: true

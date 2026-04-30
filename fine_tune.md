@@ -25,6 +25,54 @@ V-JEPA 原设计针对连续视频（~24fps）。OLMo-Earth 提供固定 12 帧�
 
 ---
 
+## 训练机制设计
+
+### LLRD（Layer-wise LR Decay）
+
+**问题**：stage2/3 解冻预训练 block 时，统一 LR 导致 loss 不降反升。
+**原因**：浅层 block 特征更通用、更脆弱，承受不了与末层相同的 LR。
+**解法**：`LR(block_i) = base_lr × decay^(n_blocks−1−i)`
+
+| Block（ViT-L 24层）| LR 倍数（decay=0.75）|
+|---|---|
+| Block 23（最后）| ×1.000 |
+| Block 20 | ×0.422 |
+| Block 15 | ×0.133 |
+| Block 0（最早）| ×0.001 |
+
+- patch_embed / doy_encoding / norm 始终 ×1.0（随机初始化，需要全 LR）
+- Predictor 始终 ×1.0（浅层、快速适应）
+- `llrd_decay: 1.0` = 关闭（stage1 默认不加）
+
+### Best-of-Stage Restore
+
+每个 stage 结束后自动回滚到该 stage 内 avg_loss 最低的 epoch 权重再进下一 stage。
+- 避免末尾轻微 loss 回升带着"差一点"的权重进入下一阶段
+- stage3 结束后的最优权重即为 `checkpoint_final.pth`
+- 结合 early stopping：patience 触发 → 提前结束 → restore best → 进下一 stage
+
+### Early Stopping
+
+| Stage | patience | min_epochs |
+|---|---|---|
+| stage1 | 2 | 2 |
+| stage2 | 3 | 3 |
+| stage3 | 4 | 6 |
+
+所有 rank 在 all_reduce 后使用相同 avg_loss 判断，DDP 下不会死锁。
+
+### Checkpoint Resume
+
+每个 epoch 保存完整 resume 状态（`save_every_freq: 1`）。断连后恢复：
+
+```yaml
+meta:
+  load_checkpoint: true
+  read_checkpoint: /home/baai/vjepa2/checkpoints/checkpoint_ep0005.pth
+```
+
+---
+
 ## 波段选择
 
 ### 当前：4 波段（10m 分辨率）
@@ -71,9 +119,13 @@ RGB 权重取平均后复制到 N 个通道。Backbone 其余所有层权重完�
 
 ### 训练阶段策略
 
-1. **Stage 1（20 epochs）**：冻结 ViT backbone，只训练 `patch_embed` + `doy_encoding`
-2. **Stage 2（30 epochs）**：冻结 backbone，解冻后端 6 个 transformer block
-3. **Stage 3（50 epochs）**：全网络 fine-tune（低学习率，lr=1e-5）
+| Stage | 解冻范围 | Max epochs | Peak LR（YAML） | 有效 LR（×√8） | LLRD |
+|---|---|---|---|---|---|
+| stage1 | patch_embed + doy_encoding | 3 | 1e-3 ×8（线性） | ~8e-3 | 否 |
+| stage2 | + 后 6 个 block | 6 | 5e-5 | ~1.4e-4 | 0.75 |
+| stage3 | 全量 | 12 | 1e-5 | ~2.8e-5 | 0.75 |
+
+> Max epochs 为上限，early stopping + best-of-stage restore 自动控制实际停止位置。
 
 ---
 
@@ -89,8 +141,9 @@ RGB 权重取平均后复制到 N 个通道。Backbone 其余所有层权重完�
 | `10_sentinel2_l2a_monthly` | 10 m | B02 B03 B04 B08 | 4 × 12 = **48** |
 | `20_sentinel2_l2a_monthly` | 20 m（重采样） | B05 B06 B07 B8A B11 B12 | 6 × 12 = **72** |
 
-> 当前已下载：`10_sentinel2_l2a_monthly`（10 个 TAR）= 4 波段模式。
+> 当前已下载：`10_sentinel2_l2a_monthly`（**13 个 TAR，0000–0012**）= 4 波段模式，约 205,530 样本。
 > B11/B12 需额外下载 `20_sentinel2_l2a_monthly`。
+> **注意**：`0012.tar.aria2` 存在 → 0012.tar 下载未完成，需先确认文件大小与其他 shard 一致。
 
 ### 数据坑
 
@@ -98,7 +151,7 @@ RGB 权重取平均后复制到 N 个通道。Backbone 其余所有层权重完�
 |---|----|---------| 
 | 1 | **通道数陷阱** — `10_sentinel2_l2a_monthly` = 48ch（4×12），不是 144ch；若 `n_bands_per_timestep` 设错会静默跳过所有样本 | `_process()` 中的 `expected_ch` 检查；先跑 `inspect_sample()` 验证 |
 | 2 | **MISSING 像素（-99999）** — OLMo-Earth 用 -99999.0 标记缺失（云、边缘）；不处理会污染归一化 | `max_missing_frac` 过滤（>10% → 跳过），剩余置 0 后 clip 到 [0,1] |
-| 3 | **IterableDataset 无 `__len__`** — DataLoader 的 `len()` 抛 `TypeError`；调度器需要 `ipe`（steps/epoch） | `main()` try/except + `data.ipe` 配置项（YAML 已设 `ipe: 17830`） |
+| 3 | **IterableDataset 无 `__len__`** — DataLoader 的 `len()` 抛 `TypeError`；调度器需要 `ipe`（steps/epoch） | `main()` try/except + `data.ipe` 配置项（YAML 已设 `ipe: 12845` = 205530/16；代码再除以 world_size） |
 | 4 | **webdataset 分片不均** — TAR 文件数 < num_workers 时部分 worker 空转 | 确保 TAR 数 ≥ num_workers（10 TAR + 4 workers = OK） |
 
 ### 检查 TAR 内容
@@ -232,8 +285,26 @@ huggingface-cli download facebook/vjepa2 vjepa2_vitl16.pth --local-dir ./pretrai
 
 ## 待办
 
-- [ ] 填写 yaml 中的 `tar_path` 和 `pretrained_checkpoint` 实际路径（参见 `finetune.ipynb` Cell 1）
-- [ ] 跑 Stage 1 前 50 步（`STEPS_CAP=50`），确认 loss 稳定下降
+- [ ] 确认 0012.tar 是否完整（`ls -lh /home/baai/mnt/0012.tar* /home/baai/mnt/0000.tar`）
+- [ ] 当前训练完成后运行 visualize.py 和 linear_probe.py 评估效果
 - [ ] 确认 per-band 归一化统计值（当前为文献近似值，建议在实际数据上重新计算）
-- [ ] 确定下游验证任务（变化检测 / 土地分类）和评估指标
 - [ ] 若需 6 波段：下载 `20_sentinel2_l2a_monthly`，更新 YAML `n_bands_per_timestep: 12`，`in_chans: 6`
+
+## 下游评估命令
+
+```bash
+# PCA embedding 可视化（服务器）
+python visualize.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/checkpoint_final.pth \
+    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \
+    --output_dir /home/baai/vjepa2/vis
+
+# Linear probe（EuroSAT-MS + BreizhCrops）
+pip install torchgeo breizhcrops scikit-learn
+python linear_probe.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/checkpoint_final.pth \
+    --dataset both \
+    --data_dir /home/baai/data
+```

@@ -91,7 +91,8 @@ class OLMoEarthDataset(IterableDataset):
         max_missing_frac: float = 0.10,
         shuffle_buffer: int = 1000,
         seed: int = 42,
-        tif_key: str = "tif",        # webdataset key for the GeoTIFF bytes; verify with inspect_sample()
+        tif_key: str = "tif",
+        repeat: bool = False,        # True for DDP: cycles shards so all ranks have equal steps
     ):
         super().__init__()
         if isinstance(tar_path, (list, tuple)):
@@ -115,6 +116,7 @@ class OLMoEarthDataset(IterableDataset):
         self.shuffle_buffer   = shuffle_buffer
         self.seed             = seed
         self.tif_key          = tif_key
+        self.repeat           = repeat
 
         if self.n_out_bands in _NORM_STATS:
             self.s2_mean, self.s2_std = _NORM_STATS[self.n_out_bands]
@@ -133,14 +135,23 @@ class OLMoEarthDataset(IterableDataset):
         worker_id   = worker_info.id if worker_info is not None else 0
         rng = np.random.default_rng(self.seed + worker_id)
 
+        # Let webdataset handle both rank-level (nodesplitter=split_by_node)
+        # and worker-level splitting internally. empty_check=False silences the
+        # "no samples" ValueError when a worker legitimately receives 0 shards.
+        # repeat=True (used in DDP) cycles through shards so ranks with fewer
+        # shards (e.g. 13 shards / 4 ranks → some get 3, some get 4) always
+        # have data until max_steps is reached, preventing NCCL epoch-end desync.
         ds = (
             wds.WebDataset(
                 self.tar_files,
-                shardshuffle=True,
-                nodesplitter=wds.split_by_worker,
+                shardshuffle=500,
+                nodesplitter=wds.split_by_node,
+                empty_check=False,
             )
             .shuffle(self.shuffle_buffer)
         )
+        if self.repeat:
+            ds = ds.repeat(9999)
 
         for sample in ds:
             result = self._process(sample, rng)
@@ -182,9 +193,11 @@ class OLMoEarthDataset(IterableDataset):
         arr = np.clip(arr, 0.0, 1.0)
 
         # ── random spatial crop ───────────────────────────────────────────
-        if H > self.crop_size:
-            top  = rng.integers(0, H - self.crop_size)
-            left = rng.integers(0, W - self.crop_size)
+        if H < self.crop_size or W < self.crop_size:
+            return None   # skip undersized tiles (edge tiles in the TAR)
+        if H > self.crop_size or W > self.crop_size:
+            top  = rng.integers(0, H - self.crop_size + 1)
+            left = rng.integers(0, W - self.crop_size + 1)
             arr  = arr[:, :, top:top + self.crop_size, left:left + self.crop_size]
 
         # ── random horizontal flip ────────────────────────────────────────
