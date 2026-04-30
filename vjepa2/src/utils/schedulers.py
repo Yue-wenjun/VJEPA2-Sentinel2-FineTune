@@ -67,6 +67,12 @@ class WarmupCosineSchedule(object):
 
         return new_lr
 
+    def state_dict(self):
+        return {"_step": self._step}
+
+    def load_state_dict(self, state):
+        self._step = state["_step"]
+
 
 class CosineWDSchedule(object):
 
@@ -91,6 +97,12 @@ class CosineWDSchedule(object):
             if ("WD_exclude" not in group) or not group["WD_exclude"]:
                 group["weight_decay"] = new_wd
         return new_wd
+
+    def state_dict(self):
+        return {"_step": self._step}
+
+    def load_state_dict(self, state):
+        self._step = state["_step"]
 
 
 class LinearDecaySchedule(object):
