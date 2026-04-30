@@ -353,13 +353,16 @@ def run_one_epoch(
 
 # ── checkpoint ────────────────────────────────────────────────────────────────
 
-def save_checkpoint(encoder, predictor, optimizer, epoch, path):
-    torch.save({
+def save_checkpoint(encoder, predictor, optimizer, epoch, path, extra: dict | None = None):
+    ckpt = {
         "epoch": epoch,
-        "encoder": _backbone(encoder).state_dict(),
+        "encoder":   _backbone(encoder).state_dict(),
         "predictor": _backbone(predictor).state_dict(),
-        "opt": optimizer.state_dict(),
-    }, path)
+        "opt":       optimizer.state_dict(),
+    }
+    if extra:
+        ckpt.update(extra)
+    torch.save(ckpt, path)
     log.info(f"Saved → {path}")
 
 
@@ -465,6 +468,27 @@ def main():
         if rank0:
             log.warning("No pretrained_checkpoint specified — training from scratch")
 
+    # ── resume from a previous fine-tune run ──────────────────────────────────
+    # Set meta.load_checkpoint: true  and  meta.read_checkpoint: /path/to/ckpt.pth
+    # The checkpoint must have been saved by this script (contains stage/ep_idx).
+    resume_ckpt = None
+    resume_path = cfg["meta"].get("read_checkpoint")
+    if cfg["meta"].get("load_checkpoint") and resume_path:
+        if rank0:
+            log.info(f"Loading resume checkpoint: {resume_path}")
+        resume_ckpt = torch.load(resume_path, map_location="cpu")
+        _safe_load(encoder.backbone,   resume_ckpt["encoder"])
+        _safe_load(predictor.backbone, resume_ckpt.get("predictor", {}))
+        # Sync EMA target encoder to restored encoder weights.
+        target_encoder.load_state_dict(
+            {k: v for k, v in encoder.state_dict().items()}, strict=False)
+        if rank0:
+            log.info(
+                f"  Resumed: stage={resume_ckpt.get('stage')}  "
+                f"ep_idx={resume_ckpt.get('ep_idx')}  "
+                f"epoch={resume_ckpt.get('epoch')}"
+            )
+
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     ema = opt_cfg["ema"][0]
     loss_exp = cfg["loss"].get("loss_exp", 1.0)
@@ -486,9 +510,21 @@ def main():
     ipe = max(1, ipe // world_size)
 
     # ── 3-stage training ──────────────────────────────────────────────────────
+    STAGES = ("stage1", "stage2", "stage3")
+    STAGE_ORDER = {s: i for i, s in enumerate(STAGES)}
+
     global_epoch = 0
-    for stage_name in ("stage1", "stage2", "stage3"):
+    for stage_name in STAGES:
         stage_cfg = opt_cfg[stage_name]
+
+        # Skip stages that were already completed in a previous run.
+        if resume_ckpt is not None:
+            resume_stage = resume_ckpt.get("stage", "stage1")
+            if STAGE_ORDER[stage_name] < STAGE_ORDER[resume_stage]:
+                if rank0:
+                    log.info(f"  Skipping {stage_name} (already completed in checkpoint)")
+                continue
+
         if rank0:
             log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
 
@@ -507,12 +543,27 @@ def main():
         # Controlled by optional YAML keys per stage:
         #   early_stop_patience: N    (epochs without improvement before advancing)
         #   min_epochs_before_stop: M (don't check before epoch M, protects warmup)
-        patience   = stage_cfg.get("early_stop_patience", None)
-        min_ep     = stage_cfg.get("min_epochs_before_stop", 1)
+        patience    = stage_cfg.get("early_stop_patience", None)
+        min_ep      = stage_cfg.get("min_epochs_before_stop", 1)
         best_loss_s = float("inf")
         no_improve  = 0
+        start_ep    = 0
 
-        for ep_idx in range(stage_cfg["epochs"]):
+        # Restore training state when resuming mid-stage.
+        if resume_ckpt is not None and resume_ckpt.get("stage") == stage_name:
+            optimizer.load_state_dict(resume_ckpt["opt"])
+            if "scheduler"    in resume_ckpt: scheduler.load_state_dict(resume_ckpt["scheduler"])
+            if "wd_scheduler" in resume_ckpt: wd_scheduler.load_state_dict(resume_ckpt["wd_scheduler"])
+            if "scaler"       in resume_ckpt: scaler.load_state_dict(resume_ckpt["scaler"])
+            global_epoch = resume_ckpt["epoch"] + 1
+            start_ep     = resume_ckpt.get("ep_idx", 0) + 1
+            best_loss_s  = resume_ckpt.get("best_loss_s", float("inf"))
+            no_improve   = resume_ckpt.get("no_improve", 0)
+            resume_ckpt  = None   # consumed; don't restore again in later stages
+            if rank0:
+                log.info(f"  Restored: global_epoch={global_epoch}  start_ep={start_ep}")
+
+        for ep_idx in range(start_ep, stage_cfg["epochs"]):
             avg_loss = run_one_epoch(
                 encoder, predictor, target_encoder,
                 loader, optimizer, scheduler, wd_scheduler,
@@ -533,10 +584,21 @@ def main():
 
             if rank0:
                 log.info(f"[{stage_name}] epoch {global_epoch:04d}  avg_loss={avg_loss:.4f}")
+                # Save every epoch (save_freq=1) so a disconnect never loses more than
+                # one epoch of work. Checkpoint includes full resume state.
                 if global_epoch % save_freq == 0:
                     save_checkpoint(
                         encoder, predictor, optimizer, global_epoch,
                         folder / f"checkpoint_ep{global_epoch:04d}.pth",
+                        extra={
+                            "stage":        stage_name,
+                            "ep_idx":       ep_idx,
+                            "best_loss_s":  best_loss_s,
+                            "no_improve":   no_improve,
+                            "scheduler":    scheduler.state_dict(),
+                            "wd_scheduler": wd_scheduler.state_dict(),
+                            "scaler":       scaler.state_dict(),
+                        },
                     )
             global_epoch += 1
 

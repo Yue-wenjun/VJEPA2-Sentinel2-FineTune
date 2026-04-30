@@ -39,8 +39,10 @@ data:
   persistent_workers: true
   pin_mem: true
   # IterableDataset has no __len__; provide steps/epoch for LR scheduler.
-  # Estimate: 285,288 samples / batch_size 16 ≈ 17,830 steps/epoch.
-  ipe: 17830
+  # 12 shards × ~15,810 samples/shard = ~189,720 samples total.
+  # ipe = 189,720 / batch_size 16 = 11,857  (code then divides by world_size per rank).
+  # ipe: 17830
+  ipe: 11857
 
 # ── Mask collator (same format as V-JEPA 2.1 pretraining) ────────────────────
 mask:
@@ -148,7 +150,7 @@ optimization:
 meta:
   dtype: bfloat16
   seed: 42
-  save_every_freq: 10
+  save_every_freq: 1
   load_checkpoint: false
   read_checkpoint: null
   use_sdpa: true
