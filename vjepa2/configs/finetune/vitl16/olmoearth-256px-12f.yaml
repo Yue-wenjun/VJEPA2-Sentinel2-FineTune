@@ -108,7 +108,7 @@ optimization:
     - 0.9995
 
   stage1:
-    epochs: 3
+    epochs: 4
     lr: 1.0e-3                   # scaled ×world_size (linear) at runtime
     start_lr: 1.0e-4
     final_lr: 1.0e-4
