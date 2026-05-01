@@ -385,7 +385,7 @@ def run_one_epoch(
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(
+            grad_norm = nn.utils.clip_grad_norm_(
                 list(encoder.parameters()) + list(predictor.parameters()), 1.0
             )
             scaler.step(optimizer)
@@ -401,7 +401,9 @@ def run_one_epoch(
             total_loss += loss.item()
             n_batches += 1
             if rank0 and n_batches % 50 == 0:
-                log.info(f"  epoch {epoch:04d}  step {n_batches:5d}  loss={loss.item():.4f}")
+                current_lr = optimizer.param_groups[0]["lr"]
+                log.info(f"  epoch {epoch:04d}  step {n_batches:5d}  loss={loss.item():.4f}"
+                         f"  grad_norm={grad_norm:.3f}  lr={current_lr:.2e}")
             if max_steps is not None and n_batches >= max_steps:
                 return total_loss / n_batches
 

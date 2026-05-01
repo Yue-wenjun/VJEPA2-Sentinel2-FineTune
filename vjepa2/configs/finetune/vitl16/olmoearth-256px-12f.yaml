@@ -110,16 +110,16 @@ optimization:
 
   stage1:
     epochs: 8
-    lr: 1.0e-3                   # scaled ×world_size (linear) at runtime
-    start_lr: 1.0e-4
-    final_lr: 1.0e-4
+    lr: 2.0e-4                   # scaled ×world_size (linear) at runtime; was 1e-3 → too high with correct ipe
+    start_lr: 2.0e-5
+    final_lr: 2.0e-5
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 1                    # 1-epoch warmup out of 8 total
+    warmup: 2                    # 2-epoch warmup out of 8 total
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
     early_stop_patience: 2       # advance after 2 epochs of no improvement
-    min_epochs_before_stop: 2
+    min_epochs_before_stop: 4    # need at least warmup(2)+2 actual epochs
 
   stage2:
     epochs: 4
