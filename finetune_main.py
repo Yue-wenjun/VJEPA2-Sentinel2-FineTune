@@ -427,7 +427,9 @@ def save_checkpoint(encoder, predictor, optimizer, epoch, path, extra: dict | No
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config",   required=True)
+    parser.add_argument("--run_tag",  default=None,
+                        help="Override run_tag in yaml (checkpoint subfolder name)")
     args = parser.parse_args()
 
     # ── DDP init ──────────────────────────────────────────────────────────────
@@ -442,7 +444,8 @@ def main():
     cfg = load_config(args.config)
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if cfg["meta"].get("dtype") == "bfloat16" else torch.float32
-    folder = Path(cfg["folder"])
+    run_tag = args.run_tag or cfg.get("run_tag")
+    folder = Path(cfg["folder"]) / str(run_tag) if run_tag else Path(cfg["folder"])
     if rank0:
         folder.mkdir(parents=True, exist_ok=True)
 

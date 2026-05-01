@@ -322,11 +322,15 @@ def run_probe(feats_tr: np.ndarray, labels_tr: np.ndarray,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config",      required=True)
-    parser.add_argument("--checkpoint",  required=True)
+    parser.add_argument("--checkpoint",  default=None,
+                        help="Checkpoint path (default: <folder>/<run_tag>/checkpoint_final.pth)")
+    parser.add_argument("--run_tag",     default=None,
+                        help="Run subfolder name, e.g. run01; auto-fills --checkpoint and --output_dir")
     parser.add_argument("--dataset",     default="both",
                         choices=["eurosat", "breizhcrops", "both"])
     parser.add_argument("--data_dir",    default="data")
-    parser.add_argument("--output_dir",  default="probe_results")
+    parser.add_argument("--output_dir",  default=None,
+                        help="Output dir (default: probe_results or probe_results/<run_tag>)")
     parser.add_argument("--batch_size",  type=int, default=16)
     parser.add_argument("--no_cache",    action="store_true",
                         help="Re-extract features even if cache exists")
@@ -335,10 +339,15 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    run_tag = args.run_tag or cfg.get("run_tag")
+    folder  = Path(cfg["folder"]) / str(run_tag) if run_tag else Path(cfg["folder"])
+
+    checkpoint = args.checkpoint or str(folder / "checkpoint_final.pth")
+    output_dir = Path(args.output_dir) if args.output_dir else Path("probe_results") / str(run_tag) if run_tag else Path("probe_results")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.bfloat16 if cfg["meta"].get("dtype") == "bfloat16" else torch.float32
     data_dir   = Path(args.data_dir)
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -346,7 +355,7 @@ def main():
 
     # ── build frozen encoder ──────────────────────────────────────────────
     print("Building frozen encoder …")
-    encoder = build_frozen_encoder(cfg, args.checkpoint, device)
+    encoder = build_frozen_encoder(cfg, checkpoint, device)
 
     results = {}
 
@@ -435,7 +444,7 @@ def main():
     # Save summary
     summary_path = output_dir / "results.txt"
     with open(summary_path, "w") as f:
-        f.write(f"Checkpoint: {args.checkpoint}\n\n")
+        f.write(f"Checkpoint: {checkpoint}\n\n")
         for name, acc in results.items():
             f.write(f"{name}: {acc * 100:.2f}%\n")
     print(f"\nSaved summary → {summary_path}")

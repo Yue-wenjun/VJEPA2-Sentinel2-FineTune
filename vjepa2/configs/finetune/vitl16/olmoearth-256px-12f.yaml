@@ -5,6 +5,7 @@ nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
 folder: /home/baai/vjepa2/checkpoints
+run_tag: run01          # change to run02, run03 … each new training run
 
 # ── OLMo-Earth data (local TAR files) ────────────────────────────────────────
 olmoearth:
@@ -108,34 +109,34 @@ optimization:
     - 0.9995
 
   stage1:
-    epochs: 6
+    epochs: 8
     lr: 1.0e-3                   # scaled ×world_size (linear) at runtime
     start_lr: 1.0e-4
     final_lr: 1.0e-4
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 1                    # 1-epoch warmup out of 3 total
+    warmup: 1                    # 1-epoch warmup out of 8 total
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
     early_stop_patience: 2       # advance after 2 epochs of no improvement
     min_epochs_before_stop: 2
 
   stage2:
-    epochs: 6
+    epochs: 4
     lr: 5.0e-5                   # scaled ×√world_size (sqrt) at runtime
     start_lr: 5.0e-6
     final_lr: 1.0e-5
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 2                    # 2-epoch warmup out of 6
+    warmup: 2                    # 2-epoch warmup out of 4
     freeze_backbone: true
     unfreeze_last_n_blocks: 6
     llrd_decay: 0.75             # last block ×1.0, each block earlier ×0.75
-    early_stop_patience: 3       # advance if no improvement for 3 consecutive epochs
-    min_epochs_before_stop: 3
+    early_stop_patience: 2       # advance if no improvement for 2 consecutive epochs
+    min_epochs_before_stop: 2
 
   stage3:
-    epochs: 12
+    epochs: 10
     lr: 1.0e-5                   # scaled ×√world_size (sqrt) at runtime
     start_lr: 1.0e-6
     final_lr: 1.0e-6

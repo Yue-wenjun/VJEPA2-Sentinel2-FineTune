@@ -127,7 +127,6 @@ def collect_samples(cfg: dict, n: int) -> list[tuple[torch.Tensor, torch.Tensor]
         shuffle_buffer=1,       # deterministic; no shuffle for visualization
         random_flip=False,
         seed=0,
-        node_split=False,       # single-process: read all shards without distribution
     )
     samples = []
     for buffers, _, doys, _ in ds:
@@ -313,22 +312,29 @@ def main():
         description="Generate paper-style embedding PCA figures from a V-JEPA 2.1 checkpoint.")
     parser.add_argument("--config",      required=True,
                         help="YAML config (same file used for fine-tuning)")
-    parser.add_argument("--checkpoint",  required=True,
-                        help="Fine-tuned .pth checkpoint path")
+    parser.add_argument("--checkpoint",  default=None,
+                        help="Fine-tuned .pth checkpoint (default: <folder>/<run_tag>/checkpoint_final.pth)")
+    parser.add_argument("--run_tag",     default=None,
+                        help="Run subfolder name, e.g. run01; auto-fills --checkpoint and --output_dir")
     parser.add_argument("--pretrained",  default=None,
                         help="Original pretrained checkpoint for before/after comparison")
     parser.add_argument("--n_samples",   type=int, default=6,
                         help="Number of samples to visualize (default: 6)")
-    parser.add_argument("--output_dir",  default="vis",
-                        help="Directory to write PNG files (default: ./vis)")
+    parser.add_argument("--output_dir",  default=None,
+                        help="Directory to write PNG files (default: ./vis or ./vis/<run_tag>)")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    run_tag = args.run_tag or cfg.get("run_tag")
+    folder  = Path(cfg["folder"]) / str(run_tag) if run_tag else Path(cfg["folder"])
+
+    checkpoint = args.checkpoint or str(folder / "checkpoint_final.pth")
+    out_dir    = Path(args.output_dir) if args.output_dir else Path("vis") / str(run_tag) if run_tag else Path("vis")
+
     device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype   = torch.bfloat16 if cfg["meta"].get("dtype") == "bfloat16" else torch.float32
-    out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Device: {device}  dtype: {dtype}  output: {out_dir}\n")
 
@@ -337,9 +343,9 @@ def main():
     samples = collect_samples(cfg, args.n_samples)
 
     # ── fine-tuned encoder ────────────────────────────────────────────────
-    print("\nLoading fine-tuned encoder …")
+    print(f"\nLoading fine-tuned encoder from: {checkpoint}")
     enc_ft = build_encoder(cfg, device)
-    load_finetuned(enc_ft, args.checkpoint, device)
+    load_finetuned(enc_ft, checkpoint, device)
 
     print("Extracting fine-tuned embeddings …")
     embs_ft = extract_embeddings(enc_ft, samples, device, dtype)

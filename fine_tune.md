@@ -56,7 +56,7 @@ V-JEPA 原设计针对连续视频（~24fps）。OLMo-Earth 提供固定 12 帧�
 | Stage | patience | min_epochs |
 |---|---|---|
 | stage1 | 2 | 2 |
-| stage2 | 3 | 3 |
+| stage2 | 2 | 2 |
 | stage3 | 4 | 6 |
 
 所有 rank 在 all_reduce 后使用相同 avg_loss 判断，DDP 下不会死锁。
@@ -68,8 +68,23 @@ V-JEPA 原设计针对连续视频（~24fps）。OLMo-Earth 提供固定 12 帧�
 ```yaml
 meta:
   load_checkpoint: true
-  read_checkpoint: /home/baai/vjepa2/checkpoints/checkpoint_ep0005.pth
+  read_checkpoint: /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth
 ```
+
+### 多次训练不覆盖（run_tag）
+
+每次新训练改一行，checkpoint 自动存入独立子目录：
+
+```yaml
+folder: /home/baai/vjepa2/checkpoints
+run_tag: run02   # → 存到 checkpoints/run02/
+```
+
+| run_tag | checkpoint 目录 |
+|---|---|
+| run01 | `/home/baai/vjepa2/checkpoints/run01/` |
+| run02 | `/home/baai/vjepa2/checkpoints/run02/` |
+| （不填） | `/home/baai/vjepa2/checkpoints/`（原行为） |
 
 ---
 
@@ -121,11 +136,12 @@ RGB 权重取平均后复制到 N 个通道。Backbone 其余所有层权重完�
 
 | Stage | 解冻范围 | Max epochs | Peak LR（YAML） | 有效 LR（×√8） | LLRD |
 |---|---|---|---|---|---|
-| stage1 | patch_embed + doy_encoding | 3 | 1e-3 ×8（线性） | ~8e-3 | 否 |
-| stage2 | + 后 6 个 block | 6 | 5e-5 | ~1.4e-4 | 0.75 |
-| stage3 | 全量 | 12 | 1e-5 | ~2.8e-5 | 0.75 |
+| stage1 | patch_embed + doy_encoding | 8 | 1e-3 ×8（线性） | ~8e-3 | 否 |
+| stage2 | + 后 6 个 block | 4 | 5e-5 | ~1.4e-4 | 0.75 |
+| stage3 | 全量 | 10 | 1e-5 | ~2.8e-5 | 0.75 |
 
 > Max epochs 为上限，early stopping + best-of-stage restore 自动控制实际停止位置。
+> stage2 warmup=2，epochs=4 → warmup 结束后还有 2 epoch 实际训练；低于 4 则 warmup 占比过高。
 
 ---
 
@@ -190,7 +206,7 @@ pip install -r data_pipeline/requirements.txt
 ```bash
 python -c "
 from data_pipeline.olmoearth_dataset import inspect_sample
-inspect_sample('/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar')
+inspect_sample('/home/baai/mnt/*.tar')
 "
 ```
 
@@ -198,61 +214,64 @@ inspect_sample('/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar')
 
 ```yaml
 # vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
+folder: /home/baai/vjepa2/checkpoints
+run_tag: run01          # 每次新训练改这里，避免覆盖旧 checkpoint
 olmoearth:
-  tar_path: "/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar"
-pretrained_checkpoint: "/your_checkpoints/vjepa2_vitl.pth"
+  tar_path: "/home/baai/mnt/*.tar"
+pretrained_checkpoint: "/home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt"
 ```
 
-### 3. 启动训练
+### 3. 启动训练（8 GPU）
 
 ```bash
-python finetune_main.py --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
+# 建议在 screen 里运行，防止断连丢失
+screen -S vjepa_train
+torchrun --nproc_per_node=8 finetune_main.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
+# Ctrl+A D 挂起，screen -r vjepa_train 重连
 ```
 
-调试先改 yaml `stage1.epochs: 1`，跑 50 步验证 loss 下降后再提交完整任务。
+### 4. 断连后 Resume
+
+找到最新 checkpoint，填入 yaml：
+
+```yaml
+meta:
+  load_checkpoint: true
+  read_checkpoint: /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth
+```
+
+再用同一命令重启，自动从中断处继续。
+
+### 5. 调试单步验证
+
+```bash
+# 改 yaml 先跑 1 epoch 确认 loss 下降
+# stage1.epochs: 1  →  观察约 50 步后 Ctrl+C
+torchrun --nproc_per_node=1 finetune_main.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
+```
 
 ---
 
-## 算力估算
+## 算力估算（实际配置）
 
-### 假设条件
+| 参数 | 值 |
+|------|----|
+| 模型 | ViT-L/16，~307M 参数 |
+| 输入 | [16, 4, 12, 256, 256]，token 数 = 1536/样本 |
+| 本地数据 | 13 shards，~205,530 样本，ipe=12,845 |
+| GPU | 8× GPU，per-rank ipe = 12,845 / 8 = 1,605 步/epoch |
+| Max epochs | stage1=8 + stage2=4 + stage3=10 = 22（上限） |
 
-| 参数 | 值 | 说明 |
-|------|----|------|
-| 模型 | ViT-L/16 | ~307M 参数 |
-| 输入 | [B, 4, 12, 256, 256] | 12帧月度合成，256px，4波段 |
-| 空间 token 数/帧 | 256 = (256/16)² | |
-| 总 token 数/样本 | 3,072 = 256 × 12 | |
-| 数据集规模 | 285,288 样本 | OLMo-Earth 全量 |
-| 批大小 | 16 | 256px token 数较少，可用较大 batch |
-| 每 epoch 步数 | ≈ 17,830 | 285,288 / 16 |
-| 训练总轮次 | 100 epochs | Stage1×20 + Stage2×30 + Stage3×50 |
-
-### 各阶段耗时估算（单卡 A100 80GB）
-
-| 阶段 | epochs | 步数 | 估计步时 | 小计 |
+| 阶段 | Max epochs | per-rank 步数 | 估计步时 | 小计（8 GPU） |
 |------|--------|------|---------|------|
-| Stage 1 | 20 | ~356,600 | ~0.25 s/step | ~25 h |
-| Stage 2 | 30 | ~534,900 | ~0.50 s/step | ~74 h |
-| Stage 3 | 50 | ~891,500 | ~0.70 s/step | ~173 h |
-| **合计** | **100** | **~1,783,000** | | **~272 h** |
+| Stage 1 | 8 | 8 × 1,605 = 12,840 | ~1.8 s/step | ~6.4 h |
+| Stage 2 | 4 | 4 × 1,605 = 6,420 | ~2.0 s/step | ~3.6 h |
+| Stage 3 | 10 | 10 × 1,605 = 16,050 | ~2.2 s/step | ~9.8 h |
+| **合计** | **22** | | | **~20 h** |
 
-> 步数多因为数据集大（285K vs 50K）。多卡线性加速显著：4×A100 ≈ 68 h。
-
-### 多卡估算
-
-| 配置 | 等效批大小 | 估计总时长 |
-|------|----------|----------|
-| 1 × A100 80GB | 16 | ~272 h |
-| 2 × A100 80GB | 32 | ~140 h |
-| 4 × A100 80GB | 64 | ~70 h |
-
-### 预训练权重下载
-
-```bash
-huggingface-cli download facebook/vjepa2 vjepa2_vitl16.pth --local-dir ./pretrained
-# 若受限改用镜像：export HF_ENDPOINT=https://hf-mirror.com
-```
+> early stopping 实际运行通常少于 max epochs。
 
 ---
 
@@ -264,6 +283,8 @@ huggingface-cli download facebook/vjepa2 vjepa2_vitl16.pth --local-dir ./pretrai
 | [data_pipeline/patch_embed_6ch.py](data_pipeline/patch_embed_6ch.py) | N-ch PatchEmbed3D + Prithvi-style 权重初始化 |
 | [data_pipeline/requirements.txt](data_pipeline/requirements.txt) | 依赖列表 |
 | [finetune_main.py](finetune_main.py) | 训练入口（3阶段冻结/解冻、EMA、JEPA 损失） |
+| [visualize.py](visualize.py) | PCA embedding 可视化（server 端，无显示器，输出 PNG） |
+| [linear_probe.py](linear_probe.py) | 冻结线性 probe 评估（EuroSAT-MS + BreizhCrops，自动下载数据集） |
 | [finetune.ipynb](finetune.ipynb) | 训练启动 notebook（配置、sanity check、3阶段训练、loss 曲线、embedding 提取） |
 | [vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml](vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml) | 训练配置（256px，4波段，12帧） |
 | [doc/sentinel2_pipeline/](doc/sentinel2_pipeline/) | 旧版 Sentinel-2 自采 pipeline（归档，不维护） |
@@ -292,19 +313,59 @@ huggingface-cli download facebook/vjepa2 vjepa2_vitl16.pth --local-dir ./pretrai
 
 ## 下游评估命令
 
+### 指定 checkpoint 的三种方式
+
+| 方式 | 命令 | 适用场景 |
+|------|------|---------|
+| **yaml 里设 `run_tag`** | 不传任何路径参数 | 训练刚结束，yaml 已有 run_tag |
+| **CLI `--run_tag`** | `--run_tag run02` | 对比多个 run，不改 yaml |
+| **CLI `--checkpoint`** | `--checkpoint /path/checkpoint_ep0005.pth` | 指定中间 epoch 或任意路径 |
+
+三种方式对 `visualize.py` 和 `linear_probe.py` 均有效。`--checkpoint` 优先级最高。
+
+### PCA embedding 可视化
+
 ```bash
-# PCA embedding 可视化（服务器）
+# 最简：yaml 里 run_tag: run01，不传路径
 python visualize.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/checkpoint_final.pth \
-    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \
-    --output_dir /home/baai/vjepa2/vis
+    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
 
-# Linear probe（EuroSAT-MS + BreizhCrops）
+# 多 run 对比（不改 yaml）
+python visualize.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --run_tag run02 \
+    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
+
+# 指定某个中间 epoch checkpoint
+python visualize.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth \
+    --output_dir /home/baai/vjepa2/vis/run01_ep5
+```
+
+输出 PNG 默认写到 `./vis/<run_tag>/`（或 `--output_dir` 指定路径）。
+
+### Linear Probe（EuroSAT-MS + BreizhCrops）
+
+```bash
+# 首次安装依赖
 pip install torchgeo breizhcrops scikit-learn
+
+# 运行（最简，yaml 已有 run_tag）
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/checkpoint_final.pth \
+    --dataset both \
+    --data_dir /home/baai/data
+
+# 多 run 对比
+python linear_probe.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --run_tag run02 \
     --dataset both \
     --data_dir /home/baai/data
 ```
+
+**数据集自动下载**：EuroSAT-MS（~2.8 GB）和 BreizhCrops 在 `data_dir` 不存在时会从公网自动下载（`download=True`）。服务器需要公网访问；下载完成后断网也可重复运行。
+
+特征缓存为 `.npz`（在 `output_dir` 下），第二次运行直接跳过 encoder 前向，只重新训练 probe。`--no_cache` 可强制重新提取。

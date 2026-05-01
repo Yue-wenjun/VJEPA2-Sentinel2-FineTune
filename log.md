@@ -1,5 +1,20 @@
 # 变更日志
 
+## 2026-05-01
+
+### 实验结果：stage 比例 6-6-12
+
+| 参数 | 值 |
+|------|----|
+| Stage 配置 | stage1=6 epoch / stage2=6 epoch / stage3=12 epoch |
+| 最佳 epoch | ep10（第 11 个 epoch，0-indexed） |
+| 现象 | ep10 之后 loss 开始上升，全程过拟合 |
+| 结论 | 总 epoch 数过多；ep10 后模型已进入过拟合区间 |
+
+**后续调整**：改为 8-4-10（stage1=8 / stage2=4 / stage3=10），配合 best-of-stage restore 和 early stopping（patience stage1/2=2, stage3=4），由代码自动截断，不再手动卡 epoch 数。
+
+---
+
 ## 2026-04-25
 
 ### OLMo-Earth 端到端 pipeline 验证 & finetune 全套准备
