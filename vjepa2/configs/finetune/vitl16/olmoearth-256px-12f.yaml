@@ -131,6 +131,7 @@ optimization:
     warmup: 1                    # warmup=1 (< epochs=2); 1 warmup + 1 training
     freeze_backbone: true
     unfreeze_last_n_blocks: 6
+    freeze_patch_embed: true     # protect stage1-converged patch_embed from disruption
     llrd_decay: 0.75
     early_stop_patience: 1
     min_epochs_before_stop: 2    # run both epochs always

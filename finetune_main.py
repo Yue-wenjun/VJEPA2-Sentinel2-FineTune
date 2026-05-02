@@ -206,12 +206,13 @@ def set_freeze_stage(encoder, stage_cfg: dict):
     for p in backbone.parameters():
         p.requires_grad = not freeze
 
-    # patch_embed and doy_encoding always trainable
-    for p in backbone.patch_embed.parameters():
-        p.requires_grad = True
-    if backbone.doy_encoding is not None:
-        for p in backbone.doy_encoding.parameters():
+    # patch_embed / doy_encoding: trainable by default; freeze_patch_embed=true locks them
+    if not stage_cfg.get("freeze_patch_embed", False):
+        for p in backbone.patch_embed.parameters():
             p.requires_grad = True
+        if backbone.doy_encoding is not None:
+            for p in backbone.doy_encoding.parameters():
+                p.requires_grad = True
 
     if freeze and n_unfreeze > 0:
         for blk in list(backbone.blocks)[-n_unfreeze:]:
