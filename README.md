@@ -81,41 +81,48 @@ python visualize.py \
 
 Evaluates frozen encoder features with logistic regression.
 
+**数据集准备**（服务器无公网，需手动下载）：
+```bash
+# EuroSAT：在有网的机器下载后 scp 到服务器
+wget https://madm.dfki.de/files/sentinel/EuroSATallBands.zip
+unzip EuroSATallBands.zip -d /home/baai/data/eurosat/
+
+# 或者服务器有网时加 --download 自动下载
+```
+
 ```bash
 # Install dependencies (once)
 pip install torchgeo breizhcrops scikit-learn
 
-# Run both datasets (auto-downloads data on first run, ~3 GB)
+# Run (data already on server)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --run_tag run01 \
     --dataset both \
     --data_dir /home/baai/data
 
-# EuroSAT only
+# Different run (without editing yaml)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --run_tag run01 \
-    --dataset eurosat \
-    --data_dir /home/baai/data
-
-# Specific checkpoint
-python linear_probe.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth \
+    --run_tag run02 \
     --dataset both \
     --data_dir /home/baai/data
+
+# Server has internet — auto-download
+python linear_probe.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --dataset both \
+    --data_dir /home/baai/data \
+    --download
 
 # Re-extract features (ignore .npz cache)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --run_tag run01 \
     --dataset both \
     --data_dir /home/baai/data \
     --no_cache
 ```
 
-Features are cached as `.npz` under `probe_results/<run_tag>/`. Subsequent runs skip the encoder forward pass.
+Features are cached as `.npz` under `<checkpoint_folder>/<run_tag>/probe_results/`. Subsequent runs skip the encoder forward pass.
 
 ---
 

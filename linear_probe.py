@@ -334,6 +334,8 @@ def main():
     parser.add_argument("--batch_size",  type=int, default=16)
     parser.add_argument("--no_cache",    action="store_true",
                         help="Re-extract features even if cache exists")
+    parser.add_argument("--download",    action="store_true",
+                        help="Download datasets if not present (requires internet)")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -372,7 +374,16 @@ def main():
             feats_te, labels_te = te["feats"], te["labels"]
         else:
             print("  Building EuroSAT-MS train split …")
-            ds_tr = EuroSATProbeDataset(str(data_dir / "eurosat"), "train", download=True)
+            if not args.download and not (data_dir / "eurosat").exists():
+                raise FileNotFoundError(
+                    f"EuroSAT not found at {data_dir / 'eurosat'}.\n"
+                    "Download manually on a machine with internet:\n"
+                    "  python linear_probe.py ... --download\n"
+                    "or download EuroSATallBands.zip from:\n"
+                    "  https://madm.dfki.de/files/sentinel/EuroSATallBands.zip\n"
+                    f"and extract to {data_dir / 'eurosat'}"
+                )
+            ds_tr = EuroSATProbeDataset(str(data_dir / "eurosat"), "train", download=args.download)
             ds_te = EuroSATProbeDataset(str(data_dir / "eurosat"), "test",  download=False)
             ldr_tr = DataLoader(ds_tr, batch_size=args.batch_size,
                                 shuffle=False, num_workers=4, pin_memory=True)
@@ -407,9 +418,15 @@ def main():
             class_names = list(tr["class_names"])
         else:
             print("  Building BreizhCrops train split (frh01+frh02+frh03) …")
+            if not args.download and not (data_dir / "breizhcrops").exists():
+                raise FileNotFoundError(
+                    f"BreizhCrops not found at {data_dir / 'breizhcrops'}.\n"
+                    "Download manually on a machine with internet:\n"
+                    "  python linear_probe.py ... --download"
+                )
             ds_tr = BreizhCropsProbeDataset(
                 regions=["frh01", "frh02", "frh03"],
-                root=str(data_dir / "breizhcrops"), download=True)
+                root=str(data_dir / "breizhcrops"), download=args.download)
             ds_te = BreizhCropsProbeDataset(
                 regions=["frh04"],
                 root=str(data_dir / "breizhcrops"), download=False)
