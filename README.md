@@ -81,11 +81,12 @@ python visualize.py \
 
 Evaluates frozen encoder features with logistic regression.
 
-**数据集准备**（服务器无公网，需手动下载）：
+**数据集准备**：
 ```bash
 # EuroSAT：在有网的机器下载后 scp 到服务器
-wget https://madm.dfki.de/files/sentinel/EuroSATallBands.zip
-unzip EuroSATallBands.zip -d /home/baai/data/eurosat/
+wget --no-check-certificate https://madm.dfki.de/files/sentinel/EuroSATallBands.zip
+mkdir -p ./data/eurosat/
+unzip EuroSATallBands.zip -d ./data/eurosat/
 
 # 或者服务器有网时加 --download 自动下载
 ```

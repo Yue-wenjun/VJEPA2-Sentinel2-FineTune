@@ -104,57 +104,85 @@ def build_frozen_encoder(cfg: dict, ckpt_path: str, device: torch.device) -> Mul
 
 class EuroSATProbeDataset(Dataset):
     """
-    Wraps torchgeo's EuroSAT (13-band, 64×64px).
+    Reads EuroSATallBands TIF files directly (no TorchGeo split files needed).
 
-    Selects B02/B03/B04/B08, resizes to 256×256, repeats across T=12
-    monthly time steps with real mid-month DOY values.
+    Scans root recursively for *.tif files, infers class from parent directory
+    name, and makes a deterministic 70/15/15 train/val/test split (seed=42).
+
+    Selects B02/B03/B04/B08 (band indices 1,2,3,7 in 13-band EuroSAT TIFs),
+    resizes to 256×256, repeats across T=12 monthly time steps.
     Output: (image [4,12,256,256], label int, doys [12])
     """
 
-    TARGET_BANDS = ("B02", "B03", "B04", "B08")
+    # Band order in EuroSATallBands TIF files (0-indexed)
+    # B01 B02 B03 B04 B05 B06 B07 B08 B08A B09 B10 B11 B12
+    _BAND_IDX = [1, 2, 3, 7]   # B02, B03, B04, B08
 
-    def __init__(self, root: str, split: str, download: bool = True):
+    def __init__(self, root: str, split: str, download: bool = False):
         try:
-            from torchgeo.datasets import EuroSAT
+            import rasterio
+            self._rasterio_version = rasterio.__version__
         except ImportError:
-            raise ImportError("pip install torchgeo")
+            raise ImportError("pip install rasterio")
 
-        # Request all 13 bands; we'll select 4 afterwards.
-        self._ds = EuroSAT(
-            root=root,
-            split=split,
-            download=download,
-            bands=EuroSAT.all_band_names,
-        )
-        # Resolve band indices once
-        all_bands = list(EuroSAT.all_band_names)
-        self._idx = [all_bands.index(b) for b in self.TARGET_BANDS]
+        root = Path(root)
+        tif_files = sorted(root.rglob("*.tif"))
+        if not tif_files:
+            raise FileNotFoundError(
+                f"No .tif files found under {root}.\n"
+                "Make sure EuroSATallBands is extracted there."
+            )
+
+        from collections import defaultdict
+        class_files: dict = defaultdict(list)
+        for f in tif_files:
+            class_files[f.parent.name].append(f)
+
+        classes = sorted(class_files.keys())
+        self.classes = classes
+        self._label_map = {c: i for i, c in enumerate(classes)}
+
+        rng = np.random.default_rng(42)
+        samples: list = []
+        for cls, files in sorted(class_files.items()):
+            files = sorted(files)
+            n = len(files)
+            idx = rng.permutation(n)
+            n_train = int(0.70 * n)
+            n_val   = int(0.15 * n)
+            if split == "train":
+                chosen = idx[:n_train]
+            elif split == "val":
+                chosen = idx[n_train : n_train + n_val]
+            else:
+                chosen = idx[n_train + n_val :]
+            for i in chosen:
+                samples.append((files[i], self._label_map[cls]))
+
+        self._samples = samples
         self._doys = torch.tensor(_DOYS, dtype=torch.int32)
+        print(f"  EuroSAT {split}: {len(samples)} samples, {len(classes)} classes")
 
     def __len__(self):
-        return len(self._ds)
+        return len(self._samples)
 
     def __getitem__(self, i):
-        sample = self._ds[i]
-        img = sample["image"]          # [13, 64, 64] float32 — torchgeo returns DN
-        label = int(sample["label"])
+        import rasterio
+        path, label = self._samples[i]
+        with rasterio.open(path) as src:
+            img = src.read(indexes=[b + 1 for b in self._BAND_IDX]).astype(np.float32)  # [4,64,64]
 
-        # Select 4 bands and convert DN → reflectance
-        img = img[self._idx] / 10000.0   # [4, 64, 64]
-        img = img.clamp(0.0, 1.0)
+        img = np.clip(img / 10000.0, 0.0, 1.0)
+        img = torch.from_numpy(img)
 
-        # Resize 64 → 256 (bilinear)
         img = F.interpolate(img.unsqueeze(0), size=(256, 256),
                             mode="bilinear", align_corners=False)[0]   # [4, 256, 256]
 
-        # Z-score normalisation (same as OLMo-Earth training)
         mean = _MEAN4.view(4, 1, 1)
         std  = _STD4.view(4, 1, 1)
         img  = (img - mean) / std
 
-        # Stack T=12 copies → [4, 12, 256, 256]
         img = img.unsqueeze(1).expand(-1, 12, -1, -1).contiguous()
-
         return img, label, self._doys.clone()
 
 
