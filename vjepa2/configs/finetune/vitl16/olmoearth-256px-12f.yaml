@@ -109,45 +109,45 @@ optimization:
     - 0.9995
 
   stage1:
-    epochs: 8
-    lr: 2.0e-4                   # scaled ×world_size (linear) at runtime; was 1e-3 → too high with correct ipe
+    epochs: 1
+    lr: 2.0e-4                   # scaled ×world_size (linear) at runtime; effective 1.6e-3
     start_lr: 2.0e-5
     final_lr: 2.0e-5
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 2                    # 2-epoch warmup out of 8 total
+    warmup: 1                    # warmup=epochs=1: single epoch ramps LR to peak
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
-    early_stop_patience: 2       # advance after 2 epochs of no improvement
-    min_epochs_before_stop: 4    # need at least warmup(2)+2 actual epochs
+    early_stop_patience: 1
+    min_epochs_before_stop: 1
 
   stage2:
-    epochs: 4
+    epochs: 2
     lr: 5.0e-5                   # scaled ×√world_size (sqrt) at runtime
     start_lr: 5.0e-6
     final_lr: 1.0e-5
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 2                    # 2-epoch warmup out of 4
+    warmup: 1                    # warmup=1 (< epochs=2); 1 warmup + 1 training
     freeze_backbone: true
     unfreeze_last_n_blocks: 6
-    llrd_decay: 0.75             # last block ×1.0, each block earlier ×0.75
-    early_stop_patience: 2       # advance if no improvement for 2 consecutive epochs
-    min_epochs_before_stop: 2
+    llrd_decay: 0.75
+    early_stop_patience: 1
+    min_epochs_before_stop: 2    # run both epochs always
 
   stage3:
-    epochs: 10
+    epochs: 3
     lr: 1.0e-5                   # scaled ×√world_size (sqrt) at runtime
     start_lr: 1.0e-6
     final_lr: 1.0e-6
     weight_decay: 0.04
     final_weight_decay: 0.04
-    warmup: 2
+    warmup: 1                    # warmup=1 (< epochs=3); 1 warmup + 2 training
     freeze_backbone: false
     unfreeze_last_n_blocks: -1
-    llrd_decay: 0.75             # full unfreeze — LLRD protects early layers from large LR
-    early_stop_patience: 4       # stop early if plateau; stage3 can be cut short safely
-    min_epochs_before_stop: 6
+    llrd_decay: 0.75
+    early_stop_patience: 2
+    min_epochs_before_stop: 3    # run all 3 epochs always
 
 # ── Logging / checkpointing ───────────────────────────────────────────────────
 meta:
