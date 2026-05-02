@@ -122,19 +122,20 @@ optimization:
     min_epochs_before_stop: 1
 
   stage2:
+    skip: true                   # stage2 skipped; go straight from stage1 → stage3
     epochs: 2
-    lr: 5.0e-5                   # scaled ×√world_size (sqrt) at runtime
-    start_lr: 5.0e-6
-    final_lr: 1.0e-5
+    lr: 8.0e-6
+    start_lr: 8.0e-7
+    final_lr: 4.0e-6
     weight_decay: 0.05
     final_weight_decay: 0.05
-    warmup: 1                    # warmup=1 (< epochs=2); 1 warmup + 1 training
+    warmup: 1
     freeze_backbone: true
     unfreeze_last_n_blocks: 6
-    freeze_patch_embed: true     # protect stage1-converged patch_embed from disruption
+    freeze_patch_embed: true
     llrd_decay: 0.75
     early_stop_patience: 1
-    min_epochs_before_stop: 2    # run both epochs always
+    min_epochs_before_stop: 2
 
   stage3:
     epochs: 3
@@ -155,6 +156,6 @@ meta:
   dtype: bfloat16
   seed: 42
   save_every_freq: 1
-  load_checkpoint: false
-  read_checkpoint: null
+  load_checkpoint: true
+  read_checkpoint: /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth
   use_sdpa: true

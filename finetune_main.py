@@ -451,6 +451,9 @@ def main():
     folder = Path(cfg["folder"]) / str(run_tag) if run_tag else Path(cfg["folder"])
     if rank0:
         folder.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(folder / "train.log")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(fh)
 
     seed = cfg["meta"].get("seed", 42)
     torch.manual_seed(seed + local_rank)
@@ -587,6 +590,12 @@ def main():
                 if rank0:
                     log.info(f"  Skipping {stage_name} (already completed in checkpoint)")
                 continue
+
+        # Explicit skip via yaml: skip: true
+        if stage_cfg.get("skip", False):
+            if rank0:
+                log.info(f"  Skipping {stage_name} (skip: true in config)")
+            continue
 
         if rank0:
             log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
