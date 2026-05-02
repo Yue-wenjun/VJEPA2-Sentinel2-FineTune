@@ -198,65 +198,6 @@ inspect_sample("/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar")
 
 ---
 
-## 使用方法
-
-```bash
-pip install -r data_pipeline/requirements.txt
-```
-
-### 1. 检查 TAR 内容（首次必做）
-
-```bash
-python -c "
-from data_pipeline.olmoearth_dataset import inspect_sample
-inspect_sample('/home/baai/mnt/*.tar')
-"
-```
-
-### 2. 编辑训练配置
-
-```yaml
-# vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
-folder: /home/baai/vjepa2/checkpoints
-run_tag: run01          # 每次新训练改这里，避免覆盖旧 checkpoint
-olmoearth:
-  tar_path: "/home/baai/mnt/*.tar"
-pretrained_checkpoint: "/home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt"
-```
-
-### 3. 启动训练（8 GPU）
-
-```bash
-# 建议在 screen 里运行，防止断连丢失
-screen -S vjepa_train
-torchrun --nproc_per_node=8 finetune_main.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
-# Ctrl+A D 挂起，screen -r vjepa_train 重连
-```
-
-### 4. 断连后 Resume
-
-找到最新 checkpoint，填入 yaml：
-
-```yaml
-meta:
-  load_checkpoint: true
-  read_checkpoint: /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth
-```
-
-再用同一命令重启，自动从中断处继续。
-
-### 5. 调试单步验证
-
-```bash
-# 改 yaml 先跑 1 epoch 确认 loss 下降
-# stage1.epochs: 1  →  观察约 50 步后 Ctrl+C
-torchrun --nproc_per_node=1 finetune_main.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
-```
-
----
-
 ## 算力估算（实际配置）
 
 | 参数 | 值 |
@@ -309,96 +250,88 @@ torchrun --nproc_per_node=1 finetune_main.py \
 
 ## 实验记录
 
-### run03/ep0000 — stage1 only（2026-05-02）
+> 评估方式：frozen encoder + sklearn LogisticRegression，EuroSAT-MS 10类分类，test split 4050样本。
+> checkpoint：`/home/baai/vjepa2/checkpoints/<run_tag>/checkpoint_final.pth`（或指定 epoch）。
+
+### 对比汇总（EuroSAT-MS Linear Probe）
+
+| # | 模型 | 配置 | Top-1 | macro-F1 |
+|---|------|------|-------|----------|
+| A | 预训练原始权重（无微调） | patch_embed 随机初始化 4ch，backbone 完整加载 | 91.41% | 0.911 |
+| B | 旧 6-6-12 ep10 | stage1+2+3 完整训练，ep10 最优（ep11 后过拟合） | 94.84% | 0.947 |
+| C | **run03/ep0000（stage1 only）** | patch_embed + doy_encoding，1 epoch，lr=2e-4 | **97.23%** | **0.971** |
+
+**结论**：stage1 单 epoch 微调 patch_embed 即可超越完整 3-stage 训练（+2.39pp vs B，+5.82pp vs A）。过多解冻 backbone 反而引入过拟合。
+
+---
+
+### A — 预训练原始权重（无微调，2026-05-02）
+
+checkpoint：`/home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt`（`--run_tag pretrained`）
+
+patch_embed 4ch 随机初始化（原始权重为 3ch，形状不匹配跳过），backbone transformer blocks 完整加载。
+
+| 类别 | precision | recall | f1-score | support |
+|------|-----------|--------|----------|---------|
+| AnnualCrop | 0.899 | 0.913 | 0.906 | 450 |
+| Forest | 0.960 | 0.971 | 0.966 | 450 |
+| HerbaceousVegetation | 0.889 | 0.853 | 0.871 | 450 |
+| Highway | 0.802 | 0.829 | 0.815 | 375 |
+| Industrial | 0.934 | 0.947 | 0.940 | 375 |
+| Pasture | 0.875 | 0.863 | 0.869 | 300 |
+| PermanentCrop | 0.848 | 0.845 | 0.846 | 375 |
+| Residential | 0.943 | 0.956 | 0.949 | 450 |
+| River | 0.978 | 0.928 | 0.952 | 375 |
+| SeaLake | 0.987 | 1.000 | 0.993 | 450 |
+| **macro avg** | **0.911** | **0.911** | **0.911** | 4050 |
+| **Top-1** | | | **91.41%** | 4050 |
+
+---
+
+### B — 旧 6-6-12 ep10（2026-05-01）
+
+stage1（6 epoch）→ stage2（6 epoch）→ stage3（12 epoch），ep10 为最优，ep11 后过拟合。
+
+| 类别 | precision | recall | f1-score | support |
+|------|-----------|--------|----------|---------|
+| AnnualCrop | 0.934 | 0.938 | 0.936 | 450 |
+| Forest | 0.975 | 0.971 | 0.973 | 450 |
+| HerbaceousVegetation | 0.909 | 0.929 | 0.919 | 450 |
+| Highway | 0.910 | 0.891 | 0.900 | 375 |
+| Industrial | 0.948 | 0.979 | 0.963 | 375 |
+| Pasture | 0.926 | 0.923 | 0.925 | 300 |
+| PermanentCrop | 0.902 | 0.907 | 0.904 | 375 |
+| Residential | 0.984 | 0.962 | 0.973 | 450 |
+| River | 0.984 | 0.971 | 0.977 | 375 |
+| SeaLake | 0.998 | 0.998 | 0.998 | 450 |
+| **macro avg** | **0.947** | **0.947** | **0.947** | 4050 |
+| **Top-1** | | | **94.84%** | 4050 |
+
+---
+
+### C — run03/ep0000，stage1 only（2026-05-02）
 
 配置：stage1（patch_embed + doy_encoding，1 epoch，lr=2e-4，eff 1.6e-3），stage2 skip=true，不进入 stage3。
 
-**EuroSAT-MS Linear Probe（frozen encoder）**
-
-| | Top-1 | macro-F1 |
-|--|--|--|
-| run03/ep0000（stage1 only） | **97.23%** | 0.971 |
-
-Per-class F1：AnnualCrop 0.966 · Forest 0.988 · HerbaceousVegetation 0.957 · Highway 0.968 · Industrial 0.981 · Pasture 0.943 · PermanentCrop 0.940 · Residential 0.984 · River 0.988 · SeaLake 0.997
-
-### 历史对比
-
-| Run | 配置 | EuroSAT Top-1 |
-|-----|------|--------------|
-| 旧 6-6-12 ep10 | stage1+2+3 完整训练，过拟合后 ep10 最优 | 94.84% |
-| run03/ep0000 | stage1 only，1 epoch | **97.23%** |
+| 类别 | precision | recall | f1-score | support |
+|------|-----------|--------|----------|---------|
+| AnnualCrop | 0.958 | 0.973 | 0.966 | 450 |
+| Forest | 0.985 | 0.991 | 0.988 | 450 |
+| HerbaceousVegetation | 0.948 | 0.967 | 0.957 | 450 |
+| Highway | 0.976 | 0.960 | 0.968 | 375 |
+| Industrial | 0.981 | 0.981 | 0.981 | 375 |
+| Pasture | 0.952 | 0.933 | 0.943 | 300 |
+| PermanentCrop | 0.944 | 0.936 | 0.940 | 375 |
+| Residential | 0.984 | 0.984 | 0.984 | 450 |
+| River | 0.992 | 0.984 | 0.988 | 375 |
+| SeaLake | 0.998 | 0.996 | 0.997 | 450 |
+| **macro avg** | **0.972** | **0.971** | **0.971** | 4050 |
+| **Top-1** | | | **97.23%** | 4050 |
 
 ---
 
 ## 待办
 
-- [ ] 确认 0012.tar 是否完整（`ls -lh /home/baai/mnt/0012.tar* /home/baai/mnt/0000.tar`）
-- [ ] 确认 per-band 归一化统计值（当前为文献近似值，建议在实际数据上重新计算）
-- [ ] 若需 6 波段：下载 `20_sentinel2_l2a_monthly`，更新 YAML `n_bands_per_timestep: 12`，`in_chans: 6`
 - [ ] 运行 BreizhCrops linear probe（数据已在服务器，--dataset both）
 
-## 下游评估命令
-
-### 指定 checkpoint 的三种方式
-
-| 方式 | 命令 | 适用场景 |
-|------|------|---------|
-| **yaml 里设 `run_tag`** | 不传任何路径参数 | 训练刚结束，yaml 已有 run_tag |
-| **CLI `--run_tag`** | `--run_tag run02` | 对比多个 run，不改 yaml |
-| **CLI `--checkpoint`** | `--checkpoint /path/checkpoint_ep0005.pth` | 指定中间 epoch 或任意路径 |
-
-三种方式对 `visualize.py` 和 `linear_probe.py` 均有效。`--checkpoint` 优先级最高。
-
-### PCA embedding 可视化
-
-```bash
-# 最简：yaml 里 run_tag: run01，不传路径
-python visualize.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
-
-# 多 run 对比（不改 yaml）
-python visualize.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --run_tag run02 \
-    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
-
-# 指定某个中间 epoch checkpoint
-python visualize.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth \
-    --output_dir /home/baai/vjepa2/vis/run01_ep5
-```
-
-输出 PNG 默认写到 `./vis/<run_tag>/`（或 `--output_dir` 指定路径）。
-
-### Linear Probe（EuroSAT-MS + BreizhCrops）
-
-```bash
-# 首次安装依赖
-pip install rasterio breizhcrops scikit-learn
-
-# 运行（最简，yaml 已有 run_tag）
-python linear_probe.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --dataset both \
-    --data_dir /home/baai/data
-
-# 多 run 对比（不改 yaml）
-python linear_probe.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --run_tag run02 \
-    --dataset both \
-    --data_dir /home/baai/data
-
-# 服务器有网时自动下载数据集
-python linear_probe.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --dataset both \
-    --data_dir /home/baai/data \
-    --download
-```
-
-**数据集**：默认不自动联网（`--download` 显式开启）。EuroSAT 直接扫 `data_dir/eurosat/` 下的 TIF 文件，不依赖 TorchGeo split 文件；BreizhCrops 需提前在有网机器下载后 scp 到服务器。
-
-特征缓存为 `.npz`，写到 `checkpoints/<run_tag>/probe_results/`（与 checkpoint 同目录）。第二次运行直接跳过 encoder 前向，只重新训练 probe。`--no_cache` 可强制重新提取。
+> 所有命令参见 [README.md](README.md)。

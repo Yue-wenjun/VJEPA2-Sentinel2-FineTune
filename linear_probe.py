@@ -219,6 +219,8 @@ class BreizhCropsProbeDataset(Dataset):
             ds = BC(region=region, root=root, year=2017)
             for idx in range(len(ds)):
                 X, y, _ = ds[idx]
+                if isinstance(X, torch.Tensor):
+                    X = X.numpy()
                 if isinstance(X, np.ndarray) and len(X) > 0:
                     self._samples.append((X.astype(np.float32), int(y)))
 

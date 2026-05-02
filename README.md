@@ -104,10 +104,24 @@ mv ~/vjepa2/breizhcrops/ /home/baai/vjepa2/data/breizhcrops/
 # Install dependencies (once)
 pip install rasterio breizhcrops scikit-learn
 
-# Run (data already on server)
+# Both datasets — yaml run_tag (uses checkpoint_final.pth)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --dataset both \
+    --data_dir /home/baai/vjepa2/data
+
+# EuroSAT only — specific checkpoint
+python linear_probe.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset eurosat \
+    --data_dir /home/baai/vjepa2/data
+
+# BreizhCrops only — specific checkpoint
+python linear_probe.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset breizhcrops \
     --data_dir /home/baai/vjepa2/data
 
 # Different run (without editing yaml)
@@ -128,6 +142,7 @@ python linear_probe.py \
 # Re-extract features (ignore .npz cache)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset both \
     --data_dir /home/baai/vjepa2/data \
     --no_cache
