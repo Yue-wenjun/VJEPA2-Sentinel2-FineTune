@@ -397,9 +397,11 @@ def main():
 
         if cache_tr.exists() and cache_te.exists() and not args.no_cache:
             print("  Loading cached features …")
-            tr = np.load(cache_tr); te = np.load(cache_te)
+            tr = np.load(cache_tr, allow_pickle=True)
+            te = np.load(cache_te, allow_pickle=True)
             feats_tr, labels_tr = tr["feats"], tr["labels"]
             feats_te, labels_te = te["feats"], te["labels"]
+            class_names = list(tr["class_names"])
         else:
             print("  Building EuroSAT-MS train split …")
             if not args.download and not (data_dir / "eurosat").exists():
@@ -413,6 +415,7 @@ def main():
                 )
             ds_tr = EuroSATProbeDataset(str(data_dir / "eurosat"), "train", download=args.download)
             ds_te = EuroSATProbeDataset(str(data_dir / "eurosat"), "test",  download=False)
+            class_names = ds_tr.classes
             ldr_tr = DataLoader(ds_tr, batch_size=args.batch_size,
                                 shuffle=False, num_workers=4, pin_memory=True)
             ldr_te = DataLoader(ds_te, batch_size=args.batch_size,
@@ -421,12 +424,10 @@ def main():
             feats_tr, labels_tr = extract_features(encoder, ldr_tr, device, dtype, "train")
             feats_te, labels_te = extract_features(encoder, ldr_te, device, dtype, "test")
 
-            np.savez(cache_tr, feats=feats_tr, labels=labels_tr)
-            np.savez(cache_te, feats=feats_te, labels=labels_te)
+            np.savez(cache_tr, feats=feats_tr, labels=labels_tr, class_names=class_names)
+            np.savez(cache_te, feats=feats_te, labels=labels_te, class_names=class_names)
             print(f"  Features cached → {cache_tr}, {cache_te}")
 
-        from torchgeo.datasets import EuroSAT
-        class_names = list(EuroSAT.classes)
         acc = run_probe(feats_tr, labels_tr, feats_te, labels_te,
                         class_names, "EuroSAT-MS")
         results["eurosat"] = acc
