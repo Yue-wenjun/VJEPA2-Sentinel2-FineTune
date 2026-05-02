@@ -216,8 +216,7 @@ class BreizhCropsProbeDataset(Dataset):
         self._samples = []   # list of (X [T,13+], label)
         for region in regions:
             print(f"  Loading BreizhCrops {region} …")
-            ds = BC(region=region, root=root, year=2017,
-                    download=download, classmapping="majorcrops")
+            ds = BC(region=region, root=root, year=2017)
             for idx in range(len(ds)):
                 X, y, _ = ds[idx]
                 if isinstance(X, np.ndarray) and len(X) > 0:

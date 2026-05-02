@@ -136,12 +136,15 @@ RGB 权重取平均后复制到 N 个通道。Backbone 其余所有层权重完�
 
 | Stage | 解冻范围 | Max epochs | Peak LR（YAML） | 有效 LR（×√8） | LLRD |
 |---|---|---|---|---|---|
-| stage1 | patch_embed + doy_encoding | 8 | 1e-3 ×8（线性） | ~8e-3 | 否 |
-| stage2 | + 后 6 个 block | 4 | 5e-5 | ~1.4e-4 | 0.75 |
-| stage3 | 全量 | 10 | 1e-5 | ~2.8e-5 | 0.75 |
+| stage1 | patch_embed + doy_encoding | 1 | 2e-4 ×8（线性） | ~1.6e-3 | 否 |
+| stage2 | + 后 6 个 block（可 skip） | 2 | 8e-6 | ~2.3e-5 | 0.75 |
+| stage3 | 全量 | 3 | 1e-5 | ~2.8e-5 | 0.75 |
 
+> 当前配置：stage2 `skip: true`，实际只跑 stage1 → stage3。
+> stage2 的 `freeze_patch_embed: true` 防止 stage1 收敛好的 patch_embed 被 stage2 再次破坏。
 > Max epochs 为上限，early stopping + best-of-stage restore 自动控制实际停止位置。
-> stage2 warmup=2，epochs=4 → warmup 结束后还有 2 epoch 实际训练；低于 4 则 warmup 占比过高。
+
+**实验发现（2026-05-02）**：stage1 单独 1 epoch（只训 patch_embed + doy_encoding）在 EuroSAT-MS linear probe 上达到 **97.23%**，高于完整 3-stage 训练的 94.84%。说明 V-JEPA backbone 特征足够通用，过多解冻 backbone 反而引入过拟合。当前首选策略：stage1 only 或 stage1→stage3（跳过 stage2）。
 
 ---
 
@@ -304,12 +307,35 @@ torchrun --nproc_per_node=1 finetune_main.py \
 
 ---
 
+## 实验记录
+
+### run03/ep0000 — stage1 only（2026-05-02）
+
+配置：stage1（patch_embed + doy_encoding，1 epoch，lr=2e-4，eff 1.6e-3），stage2 skip=true，不进入 stage3。
+
+**EuroSAT-MS Linear Probe（frozen encoder）**
+
+| | Top-1 | macro-F1 |
+|--|--|--|
+| run03/ep0000（stage1 only） | **97.23%** | 0.971 |
+
+Per-class F1：AnnualCrop 0.966 · Forest 0.988 · HerbaceousVegetation 0.957 · Highway 0.968 · Industrial 0.981 · Pasture 0.943 · PermanentCrop 0.940 · Residential 0.984 · River 0.988 · SeaLake 0.997
+
+### 历史对比
+
+| Run | 配置 | EuroSAT Top-1 |
+|-----|------|--------------|
+| 旧 6-6-12 ep10 | stage1+2+3 完整训练，过拟合后 ep10 最优 | 94.84% |
+| run03/ep0000 | stage1 only，1 epoch | **97.23%** |
+
+---
+
 ## 待办
 
 - [ ] 确认 0012.tar 是否完整（`ls -lh /home/baai/mnt/0012.tar* /home/baai/mnt/0000.tar`）
-- [ ] 当前训练完成后运行 visualize.py 和 linear_probe.py 评估效果
 - [ ] 确认 per-band 归一化统计值（当前为文献近似值，建议在实际数据上重新计算）
 - [ ] 若需 6 波段：下载 `20_sentinel2_l2a_monthly`，更新 YAML `n_bands_per_timestep: 12`，`in_chans: 6`
+- [ ] 运行 BreizhCrops linear probe（数据已在服务器，--dataset both）
 
 ## 下游评估命令
 
@@ -350,7 +376,7 @@ python visualize.py \
 
 ```bash
 # 首次安装依赖
-pip install torchgeo breizhcrops scikit-learn
+pip install rasterio breizhcrops scikit-learn
 
 # 运行（最简，yaml 已有 run_tag）
 python linear_probe.py \
@@ -358,14 +384,21 @@ python linear_probe.py \
     --dataset both \
     --data_dir /home/baai/data
 
-# 多 run 对比
+# 多 run 对比（不改 yaml）
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --run_tag run02 \
     --dataset both \
     --data_dir /home/baai/data
+
+# 服务器有网时自动下载数据集
+python linear_probe.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --dataset both \
+    --data_dir /home/baai/data \
+    --download
 ```
 
-**数据集自动下载**：EuroSAT-MS（~2.8 GB）和 BreizhCrops 在 `data_dir` 不存在时会从公网自动下载（`download=True`）。服务器需要公网访问；下载完成后断网也可重复运行。
+**数据集**：默认不自动联网（`--download` 显式开启）。EuroSAT 直接扫 `data_dir/eurosat/` 下的 TIF 文件，不依赖 TorchGeo split 文件；BreizhCrops 需提前在有网机器下载后 scp 到服务器。
 
-特征缓存为 `.npz`（在 `output_dir` 下），第二次运行直接跳过 encoder 前向，只重新训练 probe。`--no_cache` 可强制重新提取。
+特征缓存为 `.npz`，写到 `checkpoints/<run_tag>/probe_results/`（与 checkpoint 同目录）。第二次运行直接跳过 encoder 前向，只重新训练 probe。`--no_cache` 可强制重新提取。

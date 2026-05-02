@@ -88,38 +88,48 @@ wget --no-check-certificate https://madm.dfki.de/files/sentinel/EuroSATallBands.
 mkdir -p ./data/eurosat/
 unzip EuroSATallBands.zip -d ./data/eurosat/
 
-# 或者服务器有网时加 --download 自动下载
+# BreizhCrops：在有网的机器上运行，自动下载 H5 文件（~2-3 GB）
+python -c "
+from breizhcrops import BreizhCrops as BC
+for region in ['frh01', 'frh02', 'frh03', 'frh04']:
+    print(f'Downloading {region}...')
+    BC(region=region, root='./breizhcrops', year=2017)
+print('Done')
+"
+
+mv ~/vjepa2/breizhcrops/ /home/baai/vjepa2/data/breizhcrops/
 ```
 
 ```bash
 # Install dependencies (once)
-pip install torchgeo breizhcrops scikit-learn
+pip install rasterio breizhcrops scikit-learn
 
 # Run (data already on server)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --dataset both \
-    --data_dir /home/baai/data
+    --data_dir /home/baai/vjepa2/data
 
 # Different run (without editing yaml)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --run_tag run02 \
     --dataset both \
-    --data_dir /home/baai/data
+    --data_dir /home/baai/vjepa2/data
 
-# Server has internet — auto-download
+# Pretrained baseline (before fine-tuning, for comparison)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --dataset both \
-    --data_dir /home/baai/data \
-    --download
+    --checkpoint /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \
+    --run_tag pretrained \
+    --dataset eurosat \
+    --data_dir /home/baai/vjepa2/data
 
 # Re-extract features (ignore .npz cache)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --dataset both \
-    --data_dir /home/baai/data \
+    --data_dir /home/baai/vjepa2/data \
     --no_cache
 ```
 
