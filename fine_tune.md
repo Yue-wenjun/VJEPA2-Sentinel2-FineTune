@@ -144,6 +144,32 @@ RGB 权重取平均后复制到 N 个通道。Backbone 其余所有层权重完�
 > stage2 的 `freeze_patch_embed: true` 防止 stage1 收敛好的 patch_embed 被 stage2 再次破坏。
 > Max epochs 为上限，early stopping + best-of-stage restore 自动控制实际停止位置。
 
+#### Stage 1 — 输入适配（Input Adapter）
+
+**问题**：预训练 patch_embed 是 3 通道 RGB 视频权重，而 Sentinel-2 有 4/6 个光谱波段，值域和物理含义完全不同。直接解冻整个 backbone 会让随机初始化的 patch_embed 产生巨大梯度，破坏已收敛的 transformer blocks。
+
+**做法**：冻结全部 backbone，只训练 patch_embed（Prithvi-style 初始化）和 doy_encoding（DOY 时序编码）。
+
+**效果**：让模型"学会看"多光谱影像，建立"光谱 → token 空间"的映射，代价是 backbone 完全不动。实验证明 1 epoch 即可达到 97.23% EuroSAT linear probe，说明 backbone 特征本身已经很强，输入适配是瓶颈。
+
+#### Stage 2 — 顶层 Block 微调（Top Blocks）
+
+**问题**：stage1 让 backbone 接收到正确的 token，但高层语义 block 仍然是"视频语义"而非"遥感语义"。
+
+**做法**：解冻后 6 个 transformer block（最靠近输出的语义层），保持 patch_embed 冻结（`freeze_patch_embed: true`），LLRD 0.75 保证越浅层 LR 越小。
+
+**当前跳过原因**：实验发现 stage2 反而引入过拟合，且 stage3 直接从 stage1 继续全量微调效果同样好，故设 `skip: true`。
+
+#### Stage 3 — 全量微调（Full Fine-tune）
+
+**问题**：stage1+2 之后，backbone 浅层 block 仍未适配，整体特征可能有少量 domain gap。
+
+**做法**：解冻全部参数，极小 LR + LLRD 0.75，对整个网络做温和的端到端调整。浅层 block 受 LLRD 保护，LR 约为顶层的 0.001 倍，不会破坏已收敛的通用特征。
+
+**注意**：全量微调风险最高，epoch 数要保守；early stopping + best-of-stage restore 自动防止过拟合穿透到最终权重。
+
+---
+
 **实验发现（2026-05-02）**：stage1 单独 1 epoch（只训 patch_embed + doy_encoding）在 EuroSAT-MS linear probe 上达到 **97.23%**，高于完整 3-stage 训练的 94.84%。说明 V-JEPA backbone 特征足够通用，过多解冻 backbone 反而引入过拟合。当前首选策略：stage1 only 或 stage1→stage3（跳过 stage2）。
 
 ---
@@ -290,7 +316,7 @@ patch_embed 4ch 随机初始化（原始权重为 3ch，形状不匹配跳过）
 
 ### B — 旧 6-6-12 ep10（2026-05-01）
 
-stage1（6 epoch）→ stage2（6 epoch）→ stage3（12 epoch），ep10 为最优，ep11 后过拟合。
+stage1（6 epoch）→ stage2（6 epoch）→ stage3（12 epoch），ep10 为最优，ep11 后过拟合。此方案loss较低，但有些过拟合，也没有把语义学习到位。
 
 | 类别 | precision | recall | f1-score | support |
 |------|-----------|--------|----------|---------|

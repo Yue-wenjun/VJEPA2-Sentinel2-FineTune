@@ -282,25 +282,40 @@ def extract_features(encoder: MultiSeqWrapper,
                      loader: DataLoader,
                      device: torch.device,
                      dtype: torch.dtype,
+                     pool_mode: str = "global",
+                     pca=None,
+                     n_spatial: int = 256,
+                     n_temporal: int = 6,
                      desc: str = "") -> tuple[np.ndarray, np.ndarray]:
     """
-    Run frozen encoder over all batches; mean-pool all spatial-temporal tokens.
-    Returns (features [N, embed_dim], labels [N]).
+    pool_mode="global"  : mean all 1536 tokens → [N, D]
+    pool_mode="temporal": mean 6 temporal → keep 256 spatial → per-token PCA → mean → [N, pca_dim]
+                          (requires pca to be pre-fitted; without pca reduces to global)
     """
     embed_dim = encoder.backbone.embed_dim
     all_feats, all_labels = [], []
     total = len(loader)
 
     for bi, (imgs, labels, doys) in enumerate(loader, 1):
-        imgs  = imgs.to(device, dtype=dtype)    # [B, 4, 12, 256, 256]
-        doys  = doys.to(device)                  # [B, 12]
+        imgs = imgs.to(device, dtype=dtype)
+        doys = doys.to(device)
 
         with torch.autocast(device_type=device.type, dtype=dtype):
             z = encoder([imgs], doys=doys, training_mode=False)[0]
-            # z: [B, N_TOK, embed_dim] (N_TOK = 1536 for 256px/T=12/patch=16/tubelet=2)
 
-        # Mean-pool over all spatial-temporal tokens → [B, embed_dim]
-        feats = z[:, :, :embed_dim].mean(dim=1).float().cpu().numpy()
+        z = z[:, :, :embed_dim].float().cpu().numpy()   # [B, 1536, D]
+        B = z.shape[0]
+
+        if pool_mode == "temporal" and pca is not None:
+            z_t = z.reshape(B, n_temporal, n_spatial, embed_dim).mean(axis=1)  # [B, 256, D]
+            z_flat = z_t.reshape(-1, embed_dim)                                 # [B*256, D]
+            z_proj = pca.transform(z_flat).reshape(B, n_spatial, -1).mean(axis=1)  # [B, pca_dim]
+            feats = z_proj
+        else:
+            feats = z.mean(axis=1)   # [B, D]  (global, or temporal-no-pca which equals global)
+            if pca is not None:
+                feats = pca.transform(feats)   # [B, pca_dim]
+
         all_feats.append(feats)
         all_labels.append(labels.numpy())
 
@@ -309,6 +324,49 @@ def extract_features(encoder: MultiSeqWrapper,
 
     print()
     return np.concatenate(all_feats), np.concatenate(all_labels)
+
+
+@torch.no_grad()
+def fit_pca(encoder: MultiSeqWrapper,
+            loader: DataLoader,
+            device: torch.device,
+            dtype: torch.dtype,
+            pca_dim: int,
+            pool_mode: str,
+            n_spatial: int = 256,
+            n_temporal: int = 6,
+            max_vecs: int = 300_000):
+    """Fit sklearn PCA on a subset of encoder tokens from the training loader."""
+    from sklearn.decomposition import PCA as SklearnPCA
+    embed_dim = encoder.backbone.embed_dim
+    vecs = []
+
+    for imgs, _, doys in loader:
+        imgs = imgs.to(device, dtype=dtype)
+        doys = doys.to(device)
+
+        with torch.autocast(device_type=device.type, dtype=dtype):
+            z = encoder([imgs], doys=doys, training_mode=False)[0]
+
+        z = z[:, :, :embed_dim].float().cpu().numpy()
+        B = z.shape[0]
+
+        if pool_mode == "temporal":
+            z_t = z.reshape(B, n_temporal, n_spatial, embed_dim).mean(axis=1)  # [B, 256, D]
+            vecs.append(z_t.reshape(-1, embed_dim))   # [B*256, D]
+        else:
+            vecs.append(z.mean(axis=1))   # [B, D]
+
+        if sum(v.shape[0] for v in vecs) >= max_vecs:
+            break
+
+    data = np.concatenate(vecs, axis=0)[:max_vecs]
+    pca = SklearnPCA(n_components=pca_dim)
+    pca.fit(data)
+    var = pca.explained_variance_ratio_.sum()
+    print(f"  PCA fitted on {len(data)} vectors: {embed_dim}→{pca_dim}  "
+          f"explained variance={var:.3f}")
+    return pca
 
 
 # ── linear probe ─────────────────────────────────────────────────────────────
@@ -365,6 +423,11 @@ def main():
                         help="Re-extract features even if cache exists")
     parser.add_argument("--download",    action="store_true",
                         help="Download datasets if not present (requires internet)")
+    parser.add_argument("--pool_mode",   default="global",
+                        choices=["global", "temporal"],
+                        help="global: mean all tokens; temporal: temporal-pool→per-token PCA→mean")
+    parser.add_argument("--pca_dim",     type=int, default=None,
+                        help="If set, reduce features to this dimension via PCA (e.g. 128)")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -382,7 +445,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Device: {device}  dtype: {dtype}\n")
+    # derive n_spatial / n_temporal from config
+    d = cfg["data"]
+    n_spatial  = (d["crop_size"] // d["patch_size"]) ** 2          # 256
+    n_temporal = d["frames_per_clip"] // d["tubelet_size"]          # 6
+    pca_tag    = f"_pca{args.pca_dim}" if args.pca_dim else ""
+    feat_tag   = f"_{args.pool_mode}{pca_tag}"                      # e.g. _global or _temporal_pca128
+
+    print(f"Device: {device}  dtype: {dtype}  pool={args.pool_mode}  pca_dim={args.pca_dim}\n")
 
     # ── build frozen encoder ──────────────────────────────────────────────
     print("Building frozen encoder …")
@@ -393,7 +463,7 @@ def main():
     # ══ EuroSAT-MS ══════════════════════════════════════════════════════════
     if args.dataset in ("eurosat", "both"):
         print("\n── EuroSAT-MS ──")
-        cache_tr = output_dir / "feat_eurosat_train.npz"
+        cache_tr = output_dir / f"feat_eurosat{feat_tag}_train.npz"
         cache_te = output_dir / "feat_eurosat_test.npz"
 
         if cache_tr.exists() and cache_te.exists() and not args.no_cache:
@@ -422,8 +492,12 @@ def main():
             ldr_te = DataLoader(ds_te, batch_size=args.batch_size,
                                 shuffle=False, num_workers=4, pin_memory=True)
 
-            feats_tr, labels_tr = extract_features(encoder, ldr_tr, device, dtype, "train")
-            feats_te, labels_te = extract_features(encoder, ldr_te, device, dtype, "test")
+            pca = fit_pca(encoder, ldr_tr, device, dtype, args.pca_dim,
+                          args.pool_mode, n_spatial, n_temporal) if args.pca_dim else None
+            feats_tr, labels_tr = extract_features(encoder, ldr_tr, device, dtype,
+                                                   args.pool_mode, pca, n_spatial, n_temporal, "train")
+            feats_te, labels_te = extract_features(encoder, ldr_te, device, dtype,
+                                                   args.pool_mode, pca, n_spatial, n_temporal, "test")
 
             np.savez(cache_tr, feats=feats_tr, labels=labels_tr, class_names=class_names)
             np.savez(cache_te, feats=feats_te, labels=labels_te, class_names=class_names)
@@ -436,8 +510,8 @@ def main():
     # ══ BreizhCrops ══════════════════════════════════════════════════════════
     if args.dataset in ("breizhcrops", "both"):
         print("\n── BreizhCrops (temporal crop classification) ──")
-        cache_tr = output_dir / "feat_breizhcrops_train.npz"
-        cache_te = output_dir / "feat_breizhcrops_test.npz"
+        cache_tr = output_dir / f"feat_breizhcrops{feat_tag}_train.npz"
+        cache_te = output_dir / f"feat_breizhcrops{feat_tag}_test.npz"
 
         if cache_tr.exists() and cache_te.exists() and not args.no_cache:
             print("  Loading cached features …")
@@ -467,8 +541,12 @@ def main():
             ldr_te = DataLoader(ds_te, batch_size=args.batch_size,
                                 shuffle=False, num_workers=4, pin_memory=True)
 
-            feats_tr, labels_tr = extract_features(encoder, ldr_tr, device, dtype, "train")
-            feats_te, labels_te = extract_features(encoder, ldr_te, device, dtype, "test")
+            pca = fit_pca(encoder, ldr_tr, device, dtype, args.pca_dim,
+                          args.pool_mode, n_spatial, n_temporal) if args.pca_dim else None
+            feats_tr, labels_tr = extract_features(encoder, ldr_tr, device, dtype,
+                                                   args.pool_mode, pca, n_spatial, n_temporal, "train")
+            feats_te, labels_te = extract_features(encoder, ldr_te, device, dtype,
+                                                   args.pool_mode, pca, n_spatial, n_temporal, "test")
 
             np.savez(cache_tr, feats=feats_tr, labels=labels_tr,
                      class_names=np.array(class_names))
