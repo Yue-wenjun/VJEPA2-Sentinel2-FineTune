@@ -286,8 +286,10 @@ inspect_sample("/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar")
 | A | 预训练原始权重（无微调） | patch_embed 随机初始化 4ch，backbone 完整加载 | 91.41% | 0.911 |
 | B | 旧 6-6-12 ep10 | stage1+2+3 完整训练，ep10 最优（ep11 后过拟合） | 94.84% | 0.947 |
 | C | **run03/ep0000（stage1 only）** | patch_embed + doy_encoding，1 epoch，lr=2e-4 | **97.23%** | **0.971** |
+| D | run03/ep0000 + global PCA 128 | C 的 1024-dim 特征 → PCA 降至 128 维 | 96.25% | 0.962 |
+| E | run03/ep0000 + temporal PCA 128 | 时序 pool → per-token PCA 128 → 空间均值 | 95.90% | 0.957 |
 
-**结论**：stage1 单 epoch 微调 patch_embed 即可超越完整 3-stage 训练（+2.39pp vs B，+5.82pp vs A）。过多解冻 backbone 反而引入过拟合。
+**结论**：stage1 单 epoch 微调 patch_embed 即可超越完整 3-stage 训练（+2.39pp vs B，+5.82pp vs A）。PCA 压缩（128 维）代价极小（≤1.33pp），global PCA 略优于 temporal PCA，推荐生产部署用 `global + PCA 128`（96.25%，8× 压缩）。
 
 ---
 
@@ -356,8 +358,51 @@ stage1（6 epoch）→ stage2（6 epoch）→ stage3（12 epoch），ep10 为最
 
 ---
 
+### D — run03/ep0000 + global PCA 128（2026-05-04）
+
+特征：C 的 global mean-pool 1024-dim → sklearn PCA(128)。命令：`--pca_dim 128`
+
+| 类别 | precision | recall | f1-score | support |
+|------|-----------|--------|----------|---------|
+| AnnualCrop | 0.945 | 0.960 | 0.953 | 450 |
+| Forest | 0.972 | 0.987 | 0.979 | 450 |
+| HerbaceousVegetation | 0.944 | 0.938 | 0.941 | 450 |
+| Highway | 0.951 | 0.936 | 0.944 | 375 |
+| Industrial | 0.981 | 0.981 | 0.981 | 375 |
+| Pasture | 0.933 | 0.930 | 0.932 | 300 |
+| PermanentCrop | 0.929 | 0.939 | 0.934 | 375 |
+| Residential | 0.976 | 0.984 | 0.980 | 450 |
+| River | 0.986 | 0.957 | 0.972 | 375 |
+| SeaLake | 0.998 | 0.996 | 0.997 | 450 |
+| **macro avg** | **0.962** | **0.961** | **0.961** | 4050 |
+| **Top-1** | | | **96.25%** | 4050 |
+
+---
+
+### E — run03/ep0000 + temporal PCA 128（2026-05-04）
+
+特征：时序 mean-pool（6→1）→ 保留 256 spatial tokens → 逐 token PCA(128) → 空间 mean。命令：`--pool_mode temporal --pca_dim 128`
+
+| 类别 | precision | recall | f1-score | support |
+|------|-----------|--------|----------|---------|
+| AnnualCrop | 0.939 | 0.962 | 0.951 | 450 |
+| Forest | 0.982 | 0.984 | 0.983 | 450 |
+| HerbaceousVegetation | 0.913 | 0.956 | 0.934 | 450 |
+| Highway | 0.943 | 0.925 | 0.934 | 375 |
+| Industrial | 0.973 | 0.979 | 0.976 | 375 |
+| Pasture | 0.941 | 0.910 | 0.925 | 300 |
+| PermanentCrop | 0.940 | 0.923 | 0.931 | 375 |
+| Residential | 0.982 | 0.978 | 0.980 | 450 |
+| River | 0.973 | 0.952 | 0.962 | 375 |
+| SeaLake | 0.998 | 0.996 | 0.997 | 450 |
+| **macro avg** | **0.959** | **0.956** | **0.957** | 4050 |
+| **Top-1** | | | **95.90%** | 4050 |
+
+---
+
 ## 待办
 
+- [ ] 运行 temporal pool only（`--pool_mode temporal`，结果应与 global 相同）
 - [ ] 运行 BreizhCrops linear probe（数据已在服务器，--dataset both）
 
 > 所有命令参见 [README.md](README.md)。

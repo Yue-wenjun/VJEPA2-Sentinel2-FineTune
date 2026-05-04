@@ -150,6 +150,36 @@ python linear_probe.py \
 
 Features are cached as `.npz` under `<checkpoint_folder>/<run_tag>/probe_results/`. Subsequent runs skip the encoder forward pass.
 
+### Pooling / PCA Ablation
+
+```bash
+CKPT=/home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth
+CFG=vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
+DATA=/home/baai/vjepa2/data
+
+# global mean-pool 1024-dim (baseline)
+python linear_probe.py --config $CFG --checkpoint $CKPT --dataset eurosat --data_dir $DATA
+
+# global + PCA 128
+python linear_probe.py --config $CFG --checkpoint $CKPT --dataset eurosat --data_dir $DATA \
+    --pca_dim 128
+
+# temporal pool → spatial mean → 1024-dim
+python linear_probe.py --config $CFG --checkpoint $CKPT --dataset eurosat --data_dir $DATA \
+    --pool_mode temporal
+
+# temporal pool → per-token PCA 128 → spatial mean → 128-dim
+python linear_probe.py --config $CFG --checkpoint $CKPT --dataset eurosat --data_dir $DATA \
+    --pool_mode temporal --pca_dim 128
+```
+
+| pool_mode | pca_dim | Feature dim | EuroSAT Top-1 |
+|-----------|---------|-------------|---------------|
+| global | — | 1024 | 97.23% |
+| global | 128 | 128 | 96.25% |
+| temporal | — | 1024 | = global |
+| temporal | 128 | 128 | 95.90% |
+
 ---
 
 ## Checkpoint Path Logic
