@@ -12,6 +12,7 @@ s2_data/           # Sentinel-2 patches downloaded by download_s2.py
 *.csv              # index.csv / sequences.csv are data-derived, not source
 *.tar
 doc/
+awf_raw
 
 # Model weights & checkpoints
 pretrained/        # V-JEPA 2.1 pretrained weights downloaded at runtime

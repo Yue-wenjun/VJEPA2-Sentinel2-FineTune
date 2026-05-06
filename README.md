@@ -182,9 +182,65 @@ python linear_probe.py --config $CFG --checkpoint $CKPT --dataset eurosat --data
 
 ---
 
+## Segmentation (AWF Land Cover)
+
+End-to-end fine-tuning with a lightweight decoder head. 2-stage training:
+- Stage 1 (10 epochs): freeze encoder, train decoder only
+- Stage 2 (30 epochs): unfreeze encoder, end-to-end with lower encoder LR
+
+**AWF 数据准备**：
+```bash
+# AWF：在有网的机器下载后 scp 到服务器
+pip install huggingface_hub
+huggingface-cli download allenai/olmoearth_projects_awf \
+    --repo-type dataset --local-dir ./awf_raw
+mkdir -p ./data/awf/
+tar -xf ./awf_raw/dataset.tar -C ./data/awf/
+```
+
+```bash
+# AWF — 完整 2-stage 训练（10 frozen + 30 unfrozen epochs）
+python segmentation.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset awf \
+    --data_dir /home/baai/vjepa2/data
+
+# EuroSAT — 用已有数据快速验证 decoder 架构
+python segmentation.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset eurosat \
+    --data_dir /home/baai/vjepa2/data
+
+# 自定义 epoch / LR
+python segmentation.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset awf \
+    --data_dir /home/baai/vjepa2/data \
+    --freeze_epochs 10 \
+    --unfreeze_epochs 30 \
+    --lr 1e-4 \
+    --encoder_lr_scale 0.1
+
+# 仅 stage 1（decoder-only，快速基线）
+python segmentation.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset awf \
+    --data_dir /home/baai/vjepa2/data \
+    --freeze_epochs 10 \
+    --unfreeze_epochs 0
+```
+
+Results saved to `<checkpoint_folder>/<run_tag>/seg_results/`.
+
+---
+
 ## Checkpoint Path Logic
 
-All three scripts resolve the checkpoint path the same way:
+All scripts resolve the checkpoint path the same way:
 
 | Argument | Resolved checkpoint |
 |----------|-------------------|
@@ -203,5 +259,6 @@ All three scripts resolve the checkpoint path the same way:
 | `finetune_main.py` | Training entry point (3-stage freeze/unfreeze, EMA, JEPA loss) |
 | `visualize.py` | PCA patch embedding figures (server, no display) |
 | `linear_probe.py` | Frozen linear probe on EuroSAT-MS + BreizhCrops |
+| `segmentation.py` | End-to-end segmentation fine-tuning (AWF / EuroSAT) |
 | `vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml` | Training config |
 | `fine_tune.md` | Detailed design notes (LLRD, best-of-stage restore, data pipeline) |
