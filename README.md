@@ -196,6 +196,7 @@ hf download allenai/olmoearth_projects_awf \
     --repo-type dataset --local-dir ./awf_raw
 mkdir -p ./data/awf/
 tar -xf ./awf_raw/dataset.tar -C ./data/awf/
+cp ./awf_raw/annotation_features.geojson ./data/awf/
 ```
 
 ```bash
@@ -205,6 +206,14 @@ python segmentation.py \
     --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset awf \
     --data_dir /home/baai/vjepa2/data
+
+# AWF — 训练前先跑 kNN baseline（评估 encoder 特征质量，k=20 cosine）
+python segmentation.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --dataset awf \
+    --data_dir /home/baai/vjepa2/data \
+    --eval_knn
 
 # EuroSAT — 用已有数据快速验证 decoder 架构
 python segmentation.py \

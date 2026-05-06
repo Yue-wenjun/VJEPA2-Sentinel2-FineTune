@@ -20,16 +20,16 @@ Dataset: allenai/olmoearth_projects_awf on HuggingFace (1.87 GB)
       --repo-type dataset --local-dir /path/to/awf_raw
 
   # Extract
-  tar -xf /path/to/awf_raw/dataset.tar -C /path/to/awf_raw/
-
-  # scp to server
-  scp -r /path/to/awf_raw user@server:/home/baai/vjepa2/data/awf
+  mkdir -p /path/to/data/awf
+  tar -xf /path/to/awf_raw/dataset.tar -C /path/to/data/awf/
+  cp /path/to/awf_raw/annotation_features.geojson /path/to/data/awf/
 
 Expected layout after extraction:
   data/awf/
     dataset/windows/spatial_split/task_{uuid}_point_{N}/
-      layers/sentinel2.{1-12}/B02_B03_B04_B08/geotiff.tif
-    annotation_features.geojson
+      layers/
+        label/category/geotiff.tif
+        sentinel2.{1-12}/B02_B03_B04_B08/geotiff.tif
 
 Usage:
     # AWF — 2-stage fine-tuning (10 frozen + 30 unfrozen epochs)
@@ -47,7 +47,6 @@ Usage:
 
 import argparse
 import importlib.util
-import json
 import random
 import sys
 from collections import defaultdict
@@ -162,82 +161,82 @@ def _augment(img: torch.Tensor) -> torch.Tensor:
     return img.contiguous()
 
 
+AWF_CLASS_NAMES = [
+    "Woodland Forest",
+    "Open Water",
+    "Shrubland/Savanna",
+    "Herbaceous Wetland",
+    "Grassland/Barren",
+    "Agriculture/Settlement",
+    "Montane Forest",
+    "Lava Forest",
+    "Urban/Dense Dev.",
+]
+AWF_NODATA = 9   # label value meaning "no data" in the raster
+
+
 class AWFDataset(Dataset):
     """
     rslearn-format AWF Kenya land cover (allenai/olmoearth_projects_awf).
 
-    Layout (after extracting dataset.tar):
+    Layout:
       root/
         dataset/windows/spatial_split/task_{uuid}_point_{N}/
-          layers/sentinel2.{1-12}/B02_B03_B04_B08/geotiff.tif  (4-band, one month)
-        annotation_features.geojson
+          layers/
+            label/category/geotiff.tif          (int32, nodata=9)
+            sentinel2.{1-12}/B02_B03_B04_B08/geotiff.tif
 
-    Labels: properties.oe_labels.category (int)
-    Folder→label: task_{uuid}_point_{N} maps to the N-th point (0-indexed) in
-                  annotation_features.geojson entries with oe_annotations_task_id=uuid.
-    Split: west longitude (train) / east longitude (val), boundary = median longitude.
+    Split: sort all windows by center longitude, every 5th = val (≈80/20),
+           matching the pre-built dataset's spatial split convention.
     """
 
     def __init__(self, root: str, split: str, augment: bool = False):
-        import importlib
         if importlib.util.find_spec("rasterio") is None:
             raise ImportError("pip install rasterio")
+        import rasterio
+        from rasterio.crs import CRS
+        from rasterio.warp import transform as warp_xform
 
         root        = Path(root)
-        geojson     = root / "annotation_features.geojson"
         windows_dir = root / "dataset" / "windows" / "spatial_split"
-
-        if not geojson.exists():
-            raise FileNotFoundError(f"annotation_features.geojson not found at {root}")
         if not windows_dir.exists():
             raise FileNotFoundError(f"dataset/windows/spatial_split not found at {root}")
 
-        # Parse geojson: task_uuid → [(category, longitude), ...]  (preserving order)
-        with open(geojson) as f:
-            gj = json.load(f)
+        wgs84       = CRS.from_epsg(4326)
+        all_samples = []   # (folder, label_idx, lon)
 
-        task_pts: dict = defaultdict(list)
-        for feat in gj["features"]:
-            tid = feat["properties"]["oe_annotations_task_id"]
-            cat = feat["properties"]["oe_labels"]["category"]
-            lon = feat["geometry"]["coordinates"][0]
-            task_pts[tid].append((cat, lon))
-
-        # Build class list from all unique categories (sorted)
-        all_cats  = sorted({c for pts in task_pts.values() for c, _ in pts})
-        cat_to_idx = {c: i for i, c in enumerate(all_cats)}
-        self.classes = [f"class_{c}" for c in all_cats]
-
-        # Scan folders and join with geojson labels
-        all_samples = []
         for folder in sorted(windows_dir.iterdir()):
-            name = folder.name  # "task_{uuid}_point_{N}"
-            sep  = name.rfind("_point_")
-            if sep == -1 or not folder.is_dir():
+            if not folder.is_dir():
                 continue
-            task_uuid = name[5:sep]          # strip leading "task_"
-            point_idx = int(name[sep + 7:])  # index after "_point_"
-
-            pts = task_pts.get(task_uuid)
-            if pts is None or point_idx >= len(pts):
+            label_tif = folder / "layers" / "label" / "category" / "geotiff.tif"
+            if not label_tif.exists():
                 continue
 
-            cat, lon = pts[point_idx]
-            all_samples.append((folder, cat_to_idx[cat], lon))
+            with rasterio.open(label_tif) as src:
+                arr = src.read(1)
+                cx  = (src.bounds.left + src.bounds.right) / 2
+                cy  = (src.bounds.top  + src.bounds.bottom) / 2
+                (lon,), _ = warp_xform(src.crs, wgs84, [cx], [cy])
 
-        # Spatial split by median longitude
-        lons    = [lon for _, _, lon in all_samples]
-        med_lon = float(np.median(lons)) if lons else 0.0
+            unique = np.unique(arr)
+            valid  = unique[(unique != AWF_NODATA) & (unique < len(AWF_CLASS_NAMES))]
+            if len(valid) == 0:
+                continue
+            all_samples.append((folder, int(valid[0]), lon))
+
+        # Sort by longitude; every 5th sample = val (≈80/20), matching tutorial
+        all_samples.sort(key=lambda x: x[2])
         if split == "train":
-            chosen = [(f, l) for f, l, lon in all_samples if lon <= med_lon]
+            chosen = [(f, l) for i, (f, l, _) in enumerate(all_samples) if i % 5 != 0]
         else:
-            chosen = [(f, l) for f, l, lon in all_samples if lon > med_lon]
+            chosen = [(f, l) for i, (f, l, _) in enumerate(all_samples) if i % 5 == 0]
 
         self._samples = chosen
+        self.classes  = AWF_CLASS_NAMES
         self._augment = augment
         self._doys    = torch.tensor(_DOYS, dtype=torch.int32)
-        print(f"  AWF {split}: {len(chosen)} samples, {len(self.classes)} classes "
-              f"(lon_split={med_lon:.3f}°)")
+        print(f"  AWF {split}: {len(chosen)} / {len(all_samples)} samples, "
+              f"{len(AWF_CLASS_NAMES)} classes")
 
     def __len__(self):
         return len(self._samples)
@@ -404,6 +403,39 @@ def run_eval(encoder, head, loader, device, dtype):
     return accuracy_score(labels, preds), preds, labels
 
 
+@torch.no_grad()
+def run_knn(encoder, loader_tr, loader_va, device, dtype, k: int = 20):
+    """Extract encoder features (temporal+spatial mean pool) and evaluate kNN (cosine)."""
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.preprocessing import normalize
+
+    def _extract(loader):
+        feats, labs = [], []
+        for imgs, labels, doys in loader:
+            imgs = imgs.to(device, dtype=dtype)
+            doys = doys.to(device)
+            with torch.autocast(device_type=device.type, dtype=dtype):
+                tokens = encoder([imgs], doys=doys, training_mode=False)[0]
+                feat   = tokens.float().mean(dim=1)   # [B, D]
+            feats.append(feat.cpu().numpy())
+            labs.append(labels.numpy())
+        return np.concatenate(feats), np.concatenate(labs)
+
+    encoder.eval()
+    print("  kNN: extracting train features …")
+    tr_f, tr_l = _extract(loader_tr)
+    print("  kNN: extracting val features …")
+    va_f, va_l = _extract(loader_va)
+
+    tr_f = normalize(tr_f, norm="l2")
+    va_f = normalize(va_f, norm="l2")
+
+    knn = KNeighborsClassifier(n_neighbors=min(k, len(tr_f)), metric="cosine")
+    knn.fit(tr_f, tr_l)
+    preds = knn.predict(va_f)
+    return accuracy_score(va_l, preds), preds, va_l
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -425,6 +457,8 @@ def main():
     parser.add_argument("--lr",               type=float, default=1e-4)
     parser.add_argument("--encoder_lr_scale", type=float, default=0.1,
                         help="Encoder LR = lr * encoder_lr_scale in stage 2 (default 0.1)")
+    parser.add_argument("--eval_knn", action="store_true",
+                        help="Evaluate kNN (k=20, cosine) on encoder features before training")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -470,6 +504,12 @@ def main():
 
     head = SegHead(embed_dim, num_classes, n_spatial, n_temporal).to(device)
     print(f"SegHead params: {sum(p.numel() for p in head.parameters()):,}\n")
+
+    # ── optional kNN baseline ─────────────────────────────────────────────
+    if args.eval_knn:
+        print("── kNN Evaluation (pretrained encoder) ──")
+        knn_acc, _, _ = run_knn(encoder, ldr_tr, ldr_va, device, dtype)
+        print(f"  kNN val_acc (k=20, cosine): {knn_acc * 100:.2f}%\n")
 
     # ── stage 1: freeze encoder, train decoder only ────────────────────────
     if args.freeze_epochs > 0:
