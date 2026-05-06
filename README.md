@@ -192,7 +192,7 @@ End-to-end fine-tuning with a lightweight decoder head. 2-stage training:
 ```bash
 # AWF：在有网的机器下载后 scp 到服务器
 pip install huggingface_hub
-huggingface-cli download allenai/olmoearth_projects_awf \
+hf download allenai/olmoearth_projects_awf \
     --repo-type dataset --local-dir ./awf_raw
 mkdir -p ./data/awf/
 tar -xf ./awf_raw/dataset.tar -C ./data/awf/

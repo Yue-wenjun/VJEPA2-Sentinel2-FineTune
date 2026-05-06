@@ -16,7 +16,7 @@ Dataset: allenai/olmoearth_projects_awf on HuggingFace (1.87 GB)
 
   # Download (on a machine with internet)
   pip install huggingface_hub
-  huggingface-cli download allenai/olmoearth_projects_awf \\
+  hf download allenai/olmoearth_projects_awf \\
       --repo-type dataset --local-dir /path/to/awf_raw
 
   # Extract
