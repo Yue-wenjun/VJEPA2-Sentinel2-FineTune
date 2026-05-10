@@ -71,6 +71,10 @@ def build_model(cfg: dict, device: torch.device):
     m = cfg["model"]
     d = cfg["data"]
     in_chans = m["in_chans"]
+    doy_mode = m.get("doy_mode")
+    use_doy_encoding = m.get("use_doy_encoding", doy_mode != "none")
+    if doy_mode is None:
+        doy_mode = "sinusoidal" if use_doy_encoding else "none"
 
     encoder_backbone = video_vit.__dict__[m["model_name"]](
         img_size=d["crop_size"],
@@ -78,7 +82,9 @@ def build_model(cfg: dict, device: torch.device):
         num_frames=d["frames_per_clip"],
         tubelet_size=d["tubelet_size"],
         in_chans=in_chans,
-        use_doy_encoding=m.get("use_doy_encoding", True),
+        use_doy_encoding=use_doy_encoding and doy_mode != "none",
+        doy_mode="sinusoidal" if doy_mode == "none" else doy_mode,
+        doy_num_months=m.get("doy_num_months", 12),
         use_rope=m.get("use_rope", False),
         uniform_power=m.get("uniform_power", True),
         use_sdpa=m.get("use_sdpa", True),
@@ -145,21 +151,29 @@ def _make_ddp(enc, pred, local_rank):
     with requires_grad=True, so find_unused_parameters=False is always safe."""
     raw_enc  = enc.module  if hasattr(enc,  "module") else enc
     raw_pred = pred.module if hasattr(pred, "module") else pred
-    return (
-        DistributedDataParallel(raw_enc,  device_ids=[local_rank],
-                                find_unused_parameters=False,
-                                gradient_as_bucket_view=True),
-        DistributedDataParallel(raw_pred, device_ids=[local_rank],
-                                find_unused_parameters=False,
-                                gradient_as_bucket_view=True),
-    )
+    if any(p.requires_grad for p in raw_enc.parameters()):
+        raw_enc = DistributedDataParallel(raw_enc, device_ids=[local_rank],
+                                          find_unused_parameters=False,
+                                          gradient_as_bucket_view=True)
+    if any(p.requires_grad for p in raw_pred.parameters()):
+        raw_pred = DistributedDataParallel(raw_pred, device_ids=[local_rank],
+                                           find_unused_parameters=False,
+                                           gradient_as_bucket_view=True)
+    return raw_enc, raw_pred
 
 
-def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.device, in_chans: int = 6):
+def load_pretrained_weights(
+    encoder,
+    predictor,
+    ckpt_path: str,
+    device: torch.device,
+    in_chans: int = 6,
+    patch_embed_init: str = "prithvi",
+):
     """
     Load V-JEPA 2.1 pretrained weights.
     Handles DDP-wrapped checkpoints (module.backbone.* prefix).
-    patch_embed is re-initialised via Prithvi-style 3ch→Nch channel averaging.
+    patch_embed is re-initialised according to cfg["model"]["patch_embed_init"].
     Predictor: loaded with shape-safe filter (checkpoint may differ in dist. architecture).
     doy_encoding: stays at random init (new module, not in pretrained ckpt).
     """
@@ -174,6 +188,7 @@ def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.de
         patch_size=encoder.backbone.patch_size,
         tubelet_size=encoder.backbone.tubelet_size,
         embed_dim=encoder.backbone.embed_dim,
+        init_mode=patch_embed_init,
     ).to(device)
     encoder.backbone.patch_embed = new_patch_embed
 
@@ -198,30 +213,70 @@ def load_pretrained_weights(encoder, predictor, ckpt_path: str, device: torch.de
 
 # ── freeze / unfreeze ─────────────────────────────────────────────────────────
 
-def set_freeze_stage(encoder, stage_cfg: dict):
+def _set_layernorm_trainable(module: nn.Module, trainable: bool):
+    for m in module.modules():
+        if isinstance(m, nn.LayerNorm):
+            for p in m.parameters():
+                p.requires_grad = trainable
+
+
+def _set_input_adapter_trainable(backbone: nn.Module, trainable: bool):
+    for p in backbone.patch_embed.parameters():
+        p.requires_grad = trainable
+    if getattr(backbone, "doy_encoding", None) is not None:
+        for p in backbone.doy_encoding.parameters():
+            p.requires_grad = trainable
+    for name in ("img_mod_embed", "video_mod_embed"):
+        p = getattr(backbone, name, None)
+        if isinstance(p, nn.Parameter):
+            p.requires_grad = trainable
+
+
+def set_freeze_stage(encoder, predictor, stage_cfg: dict):
     freeze = stage_cfg.get("freeze_backbone", False)
     n_unfreeze = stage_cfg.get("unfreeze_last_n_blocks", -1)
     backbone = _backbone(encoder)
+    pred_backbone = _backbone(predictor)
 
     for p in backbone.parameters():
         p.requires_grad = not freeze
+    for p in pred_backbone.parameters():
+        p.requires_grad = not stage_cfg.get("freeze_predictor", False)
 
-    # patch_embed / doy_encoding: trainable by default; freeze_patch_embed=true locks them
-    if not stage_cfg.get("freeze_patch_embed", False):
-        for p in backbone.patch_embed.parameters():
-            p.requires_grad = True
-        if backbone.doy_encoding is not None:
-            for p in backbone.doy_encoding.parameters():
-                p.requires_grad = True
+    # Input-side adapters (patch_embed / doy_encoding / modality_embedding) get
+    # explicitly unfrozen when freeze_patch_embed=false, even if freeze_backbone=true.
+    # freeze_patch_embed=true locks all three (used in stage2 once they've converged).
+    if stage_cfg.get("freeze_patch_embed", False):
+        _set_input_adapter_trainable(backbone, False)
+    else:
+        _set_input_adapter_trainable(backbone, True)
 
     if freeze and n_unfreeze > 0:
         for blk in list(backbone.blocks)[-n_unfreeze:]:
             for p in blk.parameters():
                 p.requires_grad = True
+    if freeze and stage_cfg.get("train_all_norms", False):
+        _set_layernorm_trainable(backbone, True)
+    elif freeze and stage_cfg.get("train_final_norm", False):
+        if hasattr(backbone, "norm"):
+            for p in backbone.norm.parameters():
+                p.requires_grad = True
+        if hasattr(backbone, "norms_block"):
+            for p in backbone.norms_block.parameters():
+                p.requires_grad = True
 
-    trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in encoder.parameters())
-    log.info(f"  Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
+    enc_trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+    enc_total = sum(p.numel() for p in encoder.parameters())
+    pred_trainable = sum(p.numel() for p in predictor.parameters() if p.requires_grad)
+    pred_total = sum(p.numel() for p in predictor.parameters())
+    log.info(
+        f"  Encoder trainable: {enc_trainable:,} / {enc_total:,} "
+        f"({100*enc_trainable/enc_total:.1f}%)"
+    )
+    log.info(
+        f"  Predictor trainable: {pred_trainable:,} / {pred_total:,} "
+        f"({100*pred_trainable/pred_total:.1f}%)"
+    )
 
 
 # ── optimizer ─────────────────────────────────────────────────────────────────
@@ -293,10 +348,14 @@ def build_optimizer(encoder, predictor, stage_cfg: dict, ipe: int):
             return wd, nwd
         enc_wd, enc_nowd = _split(encoder)
         pred_wd, pred_nowd = _split(predictor)
-        groups = [
-            {"params": enc_wd  + pred_wd,  "lr": lr, "weight_decay": weight_decay},
-            {"params": enc_nowd + pred_nowd, "lr": lr, "weight_decay": 0.0},
-        ]
+        groups = []
+        if enc_wd or pred_wd:
+            groups.append({"params": enc_wd + pred_wd, "lr": lr, "weight_decay": weight_decay})
+        if enc_nowd or pred_nowd:
+            groups.append({"params": enc_nowd + pred_nowd, "lr": lr, "weight_decay": 0.0})
+
+    if not groups:
+        raise ValueError("No trainable parameters for this stage; check freeze settings.")
 
     optimizer = torch.optim.AdamW(
         groups, lr=lr, betas=(0.9, 0.999), eps=1e-8,
@@ -529,7 +588,8 @@ def main():
     ckpt_path = cfg.get("pretrained_checkpoint")
     if ckpt_path:
         load_pretrained_weights(encoder, predictor, ckpt_path, device,
-                                in_chans=cfg["model"]["in_chans"])
+                                in_chans=cfg["model"]["in_chans"],
+                                patch_embed_init=cfg["model"].get("patch_embed_init", "prithvi"))
     else:
         if rank0:
             log.warning("No pretrained_checkpoint specified — training from scratch")
@@ -600,7 +660,7 @@ def main():
         if rank0:
             log.info(f"\n{'='*60}\n  {stage_name.upper()}: {stage_cfg['epochs']} epochs\n{'='*60}")
 
-        set_freeze_stage(encoder, stage_cfg)
+        set_freeze_stage(encoder, predictor, stage_cfg)
 
         # Rebuild DDP after each freeze/unfreeze so the reducer's bucket list
         # exactly matches the currently trainable parameters.

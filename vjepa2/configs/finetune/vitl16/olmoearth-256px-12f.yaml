@@ -86,7 +86,9 @@ model:
   # 4 bands from 10_sentinel2_l2a_monthly: B02 B03 B04 B08
   # Change to 6 when 20_sentinel2_l2a_monthly is also available.
   in_chans: 4
+  patch_embed_init: prithvi   # random | rgb_mean_copy | prithvi | spectral
   use_doy_encoding: true     # monthly DOY still informative for phenology
+  doy_mode: sinusoidal       # none | sinusoidal | learnable | month_token
   use_rope: true             # checkpoint was trained with RoPE (no pos_embed saved)
   pred_depth: 12
   pred_embed_dim: 384
@@ -118,6 +120,9 @@ optimization:
     warmup: 1                    # warmup=epochs=1: single epoch ramps LR to peak
     freeze_backbone: true
     unfreeze_last_n_blocks: 0
+    train_final_norm: false
+    train_all_norms: false
+    freeze_predictor: false
     early_stop_patience: 1
     min_epochs_before_stop: 1
 

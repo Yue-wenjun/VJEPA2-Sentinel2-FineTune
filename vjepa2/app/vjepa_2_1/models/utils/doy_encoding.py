@@ -20,8 +20,10 @@ class DOYEncoding(nn.Module):
     tubelet.  This gives the model an explicit seasonal signal that the
     standard frame-index temporal PE cannot provide.
 
-    Encoding: [sin(2π·d/365), cos(2π·d/365), sin(4π·d/365), cos(4π·d/365)]
-    where d is the day-of-year (1–365).
+    Supported modes:
+        sinusoidal: fixed calendar features projected to embed_dim
+        learnable: sinusoidal features plus a learnable DOY table
+        month_token: learnable month table derived from DOY
 
     Args:
         embed_dim: token embedding dimension (must match ViT embed_dim)
@@ -37,10 +39,22 @@ class DOYEncoding(nn.Module):
 
     DOY_DIM = 4
 
-    def __init__(self, embed_dim: int):
+    def __init__(self, embed_dim: int, mode: str = "sinusoidal", num_months: int = 12):
         super().__init__()
+        if mode not in {"sinusoidal", "learnable", "month_token"}:
+            raise ValueError(
+                f"Unknown DOY mode={mode!r}; expected sinusoidal, learnable, or month_token"
+            )
+        self.mode = mode
+        self.num_months = num_months
         self.proj = nn.Linear(self.DOY_DIM, embed_dim, bias=False)
         nn.init.normal_(self.proj.weight, std=0.02)
+        self.day_embed = nn.Embedding(367, embed_dim) if mode == "learnable" else None
+        self.month_embed = nn.Embedding(num_months, embed_dim) if mode == "month_token" else None
+        if self.day_embed is not None:
+            nn.init.normal_(self.day_embed.weight, std=0.02)
+        if self.month_embed is not None:
+            nn.init.normal_(self.month_embed.weight, std=0.02)
 
     @staticmethod
     def sincos(doys: torch.Tensor) -> torch.Tensor:
@@ -62,10 +76,22 @@ class DOYEncoding(nn.Module):
         B, T_full = doys.shape
         T_tube = T_full // tubelet_size
 
-        enc = self.sincos(doys)                                     # [B, T_full, 4]
-        enc = enc.view(B, T_tube, tubelet_size, self.DOY_DIM)
-        enc = enc.mean(dim=2)                                       # [B, T_tube, 4]
-        enc = self.proj(enc)                                        # [B, T_tube, D]
+        if self.mode == "month_token":
+            month = ((doys.float() - 1) * self.num_months / 365).long()
+            month = month.clamp_(0, self.num_months - 1)
+            enc = self.month_embed(month)                           # [B, T_full, D]
+            enc = enc.view(B, T_tube, tubelet_size, -1).mean(dim=2) # [B, T_tube, D]
+        else:
+            enc = self.sincos(doys)                                 # [B, T_full, 4]
+            enc = enc.view(B, T_tube, tubelet_size, self.DOY_DIM)
+            enc = enc.mean(dim=2)                                   # [B, T_tube, 4]
+            enc = self.proj(enc)                                    # [B, T_tube, D]
+            if self.day_embed is not None:
+                day = doys.long().clamp_(0, 366)
+                day_enc = self.day_embed(day)
+                day_enc = day_enc.view(B, T_tube, tubelet_size, -1).mean(dim=2)
+                enc = enc + day_enc
+
         enc = enc.unsqueeze(2).expand(-1, -1, n_spatial_tokens, -1) # [B, T_tube, S, D]
         enc = rearrange(enc, "b t s d -> b (t s) d")               # [B, N_tokens, D]
         return enc

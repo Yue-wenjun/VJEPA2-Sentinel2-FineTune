@@ -47,6 +47,8 @@ class VisionTransformer(nn.Module):
         use_rope=False,
         handle_nonsquare_inputs=True,
         use_doy_encoding=False,
+        doy_mode="sinusoidal",
+        doy_num_months=12,
         **kwargs
     ):
         super().__init__()
@@ -109,7 +111,10 @@ class VisionTransformer(nn.Module):
             ]
         )
         self.norm = norm_layer(embed_dim)
-        self.doy_encoding = DOYEncoding(embed_dim) if use_doy_encoding else None
+        self.doy_encoding = (
+            DOYEncoding(embed_dim, mode=doy_mode, num_months=doy_num_months)
+            if use_doy_encoding else None
+        )
 
         # ------ initialize weights
         if self.pos_embed is not None:

@@ -93,13 +93,19 @@ def _safe_load(module, state_dict: dict):
 
 def build_encoder(cfg: dict, ckpt_path: str, device: torch.device) -> MultiSeqWrapper:
     m, d = cfg["model"], cfg["data"]
+    doy_mode = m.get("doy_mode")
+    use_doy_encoding = m.get("use_doy_encoding", doy_mode != "none")
+    if doy_mode is None:
+        doy_mode = "sinusoidal" if use_doy_encoding else "none"
     backbone = video_vit.__dict__[m["model_name"]](
         img_size=d["crop_size"],
         patch_size=d["patch_size"],
         num_frames=d["frames_per_clip"],
         tubelet_size=d["tubelet_size"],
         in_chans=m["in_chans"],
-        use_doy_encoding=m.get("use_doy_encoding", True),
+        use_doy_encoding=use_doy_encoding and doy_mode != "none",
+        doy_mode="sinusoidal" if doy_mode == "none" else doy_mode,
+        doy_num_months=m.get("doy_num_months", 12),
         use_rope=m.get("use_rope", False),
         uniform_power=m.get("uniform_power", True),
         use_sdpa=m.get("use_sdpa", True),

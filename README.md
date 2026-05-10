@@ -46,6 +46,73 @@ torchrun --nproc_per_node=1 finetune_main.py \
 
 ---
 
+## M1 Ablation Configs
+
+For M1 experiments, keep the base yaml as the template and copy one config per run:
+
+```bash
+mkdir -p experiments/configs logs
+cp vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+   experiments/configs/m1_init_prithvi_doy_on.yaml
+```
+
+Useful config switches:
+
+```yaml
+model:
+  patch_embed_init: prithvi   # random | rgb_mean_copy | prithvi | spectral
+  use_doy_encoding: true
+  doy_mode: sinusoidal        # none | sinusoidal | learnable | month_token
+  modality_embedding: false
+
+optimization:
+  stage1:
+    train_final_norm: false
+    train_all_norms: false
+    freeze_predictor: false
+```
+
+Run with a matching tag:
+
+```bash
+RUN=m1_init_prithvi_doy_on
+torchrun --nproc_per_node=8 finetune_main.py \
+    --config experiments/configs/${RUN}.yaml \
+    --run_tag ${RUN} \
+    2>&1 | tee logs/${RUN}.log
+```
+
+Record each run in `../week2文档/ablation.md`: config path, code commit/tag, checkpoint path, linear probe command, and result.
+
+---
+
+## M0 Diagnostics
+
+`diagnostics_m0.py` runs the lightweight Stage 0 checks from the PFU checklist:
+effective rank / covariance spectrum, random vs Prithvi vs hand-crafted RGB adapter comparison, and a small EuroSAT linear probe.
+
+```bash
+python diagnostics_m0.py \
+    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
+    --checkpoint /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \
+    --data_dir /home/baai/vjepa2/data \
+    --output_dir m0_results \
+    --max_samples 2000
+```
+
+Outputs:
+
+| File | Content |
+|------|---------|
+| `m0_results/m0_results.json` | metrics and spectra for scripts |
+| `m0_results/m0_summary.md` | readable summary table |
+| `m0_results/m0_spectrum.png` | covariance spectrum overlay |
+| `m0_results/m0_scatter.png` | probe accuracy vs rank |
+
+Use `--configs random prithvi hand_rgb` to choose a subset, and `--tokens_per_sample` to control covariance memory.
+
+---
+
 ## Visualization (PCA Embeddings)
 
 Outputs PNG files to `./vis/<run_tag>/`. No display required (server-safe).
@@ -266,6 +333,7 @@ All scripts resolve the checkpoint path the same way:
 | File | Purpose |
 |------|---------|
 | `finetune_main.py` | Training entry point (3-stage freeze/unfreeze, EMA, JEPA loss) |
+| `diagnostics_m0.py` | M0 effective-rank / covariance / adapter diagnostics |
 | `visualize.py` | PCA patch embedding figures (server, no display) |
 | `linear_probe.py` | Frozen linear probe on EuroSAT-MS + BreizhCrops |
 | `segmentation.py` | End-to-end segmentation fine-tuning (AWF / EuroSAT) |

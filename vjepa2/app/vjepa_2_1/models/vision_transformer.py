@@ -56,6 +56,8 @@ class VisionTransformer(nn.Module):
         modality_embedding=True,
         n_output_distillation=4,
         use_doy_encoding=False,
+        doy_mode="sinusoidal",
+        doy_num_months=12,
         **kwargs,
     ):
         super().__init__()
@@ -198,7 +200,10 @@ class VisionTransformer(nn.Module):
             nn.init.normal_(self.video_mod_embed, std=1e-6)
             self.modality_embedding = True
 
-        self.doy_encoding = DOYEncoding(embed_dim) if use_doy_encoding else None
+        self.doy_encoding = (
+            DOYEncoding(embed_dim, mode=doy_mode, num_months=doy_num_months)
+            if use_doy_encoding else None
+        )
 
     def _init_weights(self, m):
         if isinstance(m, nn.LayerNorm):
