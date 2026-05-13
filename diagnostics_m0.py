@@ -6,7 +6,7 @@ Maps to checklist.md M0:
   0.2 token covariance comparison: hand-crafted RGB vs Prithvi vs random adapter
   0.3 EuroSAT linear probe vs spectral-distance ε preliminary correlation
 
-For each of three frozen encoder configurations on EuroSAT-MS:
+For each of five frozen encoder configurations on EuroSAT-MS:
   • extract per-sample mean-pooled features (probe-style) and per-token features
   • compute effective rank, top-k covariance spectrum
   • run a logistic-regression linear probe → top-1 accuracy
@@ -17,8 +17,8 @@ No new training. Reuses the encoder builder + EuroSAT loader from linear_probe.p
 Usage:
   python diagnostics_m0.py \\
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \\
-    --checkpoint /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \\
-    --data_dir /home/baai/data \\
+    --checkpoint ../model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \\
+    --data_dir /workspace/data \\
     --output_dir m0_results \\
     [--max_samples 2000]   # subsample EuroSAT for fast estimates
 """
@@ -86,7 +86,7 @@ class EuroSATRGB3ChDataset(EuroSATProbeDataset):
         return img, label, self._doys.clone()
 
 
-# ── encoder builders for the three M0 configurations ─────────────────────────
+# ── encoder builders for the five M0 configurations ─────────────────────────
 
 def build_encoder_random(cfg, ckpt_path, device):
     """Force a random N-channel patch_embed after loading the rest of the encoder."""
@@ -107,10 +107,10 @@ def build_encoder_random(cfg, ckpt_path, device):
     return encoder
 
 
-def build_encoder_prithvi(cfg, ckpt_path, device):
-    """patch_embed initialised by Prithvi-style RGB-mean copy."""
+def build_encoder_nch_init(cfg, ckpt_path, device, init_mode: str):
+    """Build a frozen N-channel encoder with the requested patch_embed init."""
     cfg_local = copy.deepcopy(cfg)
-    cfg_local["model"]["patch_embed_init"] = "prithvi"
+    cfg_local["model"]["patch_embed_init"] = init_mode
     encoder = build_frozen_encoder(cfg_local, ckpt_path, device)
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -121,13 +121,28 @@ def build_encoder_prithvi(cfg, ckpt_path, device):
         patch_size=cfg_local["data"]["patch_size"],
         tubelet_size=cfg_local["data"]["tubelet_size"],
         embed_dim=encoder.backbone.embed_dim,
-        init_mode="prithvi",
+        init_mode=init_mode,
     ).to(device)
     encoder.backbone.patch_embed = new_pe
     for p in encoder.backbone.patch_embed.parameters():
         p.requires_grad = False
     encoder.eval()
     return encoder
+
+
+def build_encoder_rgb_mean_copy(cfg, ckpt_path, device):
+    """patch_embed initialised by copying RGB filters and mean-initialising extras."""
+    return build_encoder_nch_init(cfg, ckpt_path, device, "rgb_mean_copy")
+
+
+def build_encoder_prithvi(cfg, ckpt_path, device):
+    """patch_embed initialised by Prithvi-style RGB-mean copy."""
+    return build_encoder_nch_init(cfg, ckpt_path, device, "prithvi")
+
+
+def build_encoder_spectral(cfg, ckpt_path, device):
+    """patch_embed initialised by mapping S2 B02/B03/B04/B08 to RGB priors."""
+    return build_encoder_nch_init(cfg, ckpt_path, device, "spectral")
 
 
 def build_encoder_hand_rgb(cfg, ckpt_path, device):
@@ -138,9 +153,11 @@ def build_encoder_hand_rgb(cfg, ckpt_path, device):
 
 
 CONFIGS = {
-    "random":    (build_encoder_random,    EuroSATProbeDataset),
-    "prithvi":   (build_encoder_prithvi,   EuroSATProbeDataset),
-    "hand_rgb":  (build_encoder_hand_rgb,  EuroSATRGB3ChDataset),
+    "random":        (build_encoder_random,        EuroSATProbeDataset),
+    "rgb_mean_copy": (build_encoder_rgb_mean_copy, EuroSATProbeDataset),
+    "prithvi":       (build_encoder_prithvi,       EuroSATProbeDataset),
+    "hand_rgb":      (build_encoder_hand_rgb,      EuroSATRGB3ChDataset),
+    "spectral":      (build_encoder_spectral,      EuroSATProbeDataset),
 }
 
 

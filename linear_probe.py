@@ -11,9 +11,9 @@ Dependencies:
 Usage:
     python linear_probe.py \\
         --config  vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \\
-        --checkpoint /home/baai/vjepa2/checkpoints/checkpoint_final.pth \\
+        --checkpoint /workspace/checkpoints/checkpoint_final.pth \\
         [--dataset eurosat|breizhcrops|both]  (default: both) \\
-        [--data_dir  /home/baai/data] \\
+        [--data_dir  /workspace/data] \\
         [--output_dir ./probe_results] \\
         [--batch_size 16] \\
         [--no_cache]   # re-extract even if .npz already exists

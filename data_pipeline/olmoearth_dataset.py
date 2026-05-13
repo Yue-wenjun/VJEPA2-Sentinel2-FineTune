@@ -63,17 +63,48 @@ class OLMoEarthDataset(IterableDataset):
     Multi-worker DataLoader is handled automatically via webdataset's split_by_worker.
 
     Args:
+        source:               Data source selector: "hf", "local", or "auto".
+                              "hf" uses HuggingFace streaming, "local" uses tar_path.
+                              "auto" chooses HF when hf_repo_id is set, otherwise local.
         tar_path:             Glob pattern or list of paths to local .tar files.
                               e.g. "/data/olmoearth/10_sentinel2_l2a_monthly/*.tar"
+        hf_repo_id:           HuggingFace dataset repo id for streaming mode,
+                              e.g. "allenai/olmoearth_pretrain_dataset".
+                              When set, .tar shards are streamed via HTTPS directly
+                              into webdataset — no local download required.
+        hf_folder:            Subfolder within the HF repo to filter shards.
+                              The OlmoEarth repo offers multiple modalities on the
+                              same spatial grid and time alignment:
+                                10_sentinel2_l2a_monthly  — S2 @10m, 4 bands
+                                20_sentinel2_l2a_monthly  — S2 @20m, 6 bands
+                                40_sentinel2_l2a_monthly  — S2 @40m, 2 bands
+                                10_sentinel1_monthly      — S1 SAR (VV, VH)
+                                10_landsat_monthly        — Landsat 8/9
+                                10_era5_10_monthly        — ERA5 reanalysis
+                                10_cdl / 10_worldcover / 10_worldcereal — labels
+                                10_srtm / 10_wri_canopy_height_map      — DEM/canopy
+                                10_openstreetmap_raster   — OSM raster
+                              SAR work uses 10_sentinel1_monthly with
+                              n_bands_per_timestep=2 (VV, VH) and SAR-specific
+                              normalization stats (dB scale, not DN).
+        hf_token:             HuggingFace access token, only needed for private
+                              datasets. Public datasets work without a token.
         n_bands_per_timestep: Bands stored per monthly timestep in each GeoTIFF.
                               4 for ``10_sentinel2_l2a_monthly`` (B02/B03/B04/B08).
         band_indices:         Which bands to extract from each timestep.
                               None = all bands (0 … n_bands_per_timestep-1).
         crop_size:            Spatial crop in px; must be ≤ NATIVE_PX (256).
         random_flip:          Random horizontal flip augmentation.
-        normalize:            Apply per-band S2 z-score normalization.
+        norm:                 Input normalization mode: "reflectance", "sar_db", or "none".
+                              reflectance: divide by dn_scale, clip to [0, 1],
+                                           then apply optical band z-score stats.
+                              sar_db: clip dB values to sar_db_range, then map
+                                      to a roughly zero-centered scale.
+                              none: keep raw values except missing-value fill.
+        normalize:            Apply the final normalization step for the selected norm.
         dn_scale:             Divide raw pixel values by this to convert to reflectance.
                               Run inspect_sample() to verify before training.
+        sar_db_range:         Min/max dB range used by norm="sar_db".
         max_missing_frac:     Skip sample if fraction of MISSING pixels exceeds this.
         shuffle_buffer:       webdataset shuffle buffer size (samples).
         seed:                 Base RNG seed (each worker uses seed + worker_id).
@@ -81,13 +112,19 @@ class OLMoEarthDataset(IterableDataset):
 
     def __init__(
         self,
-        tar_path: str | Sequence[str],
+        source: str = "auto",
+        tar_path: str | Sequence[str] | None = None,
+        hf_repo_id: str | None = None,
+        hf_folder: str = "",
+        hf_token: str | None = None,
         n_bands_per_timestep: int = 4,
         band_indices: list[int] | None = None,
         crop_size: int = 256,
         random_flip: bool = True,
+        norm: str = "reflectance",
         normalize: bool = True,
         dn_scale: float = 10000.0,
+        sar_db_range: tuple[float, float] = (-30.0, 5.0),
         max_missing_frac: float = 0.10,
         shuffle_buffer: int = 1000,
         seed: int = 42,
@@ -95,28 +132,51 @@ class OLMoEarthDataset(IterableDataset):
         repeat: bool = False,        # True for DDP: cycles shards so all ranks have equal steps
     ):
         super().__init__()
-        if isinstance(tar_path, (list, tuple)):
-            self.tar_files = list(tar_path)
-        elif "*" in str(tar_path) or "?" in str(tar_path):
-            self.tar_files = sorted(_glob.glob(str(tar_path)))
-        else:
-            self.tar_files = [str(tar_path)]
+        source = source.lower()
+        if source not in {"auto", "hf", "local"}:
+            raise ValueError(f"Unknown OLMoEarth source={source!r}; use auto, hf, or local")
+        if source == "auto":
+            source = "hf" if hf_repo_id else "local"
 
-        if not self.tar_files:
-            raise FileNotFoundError(f"No TAR files found: {tar_path}")
+        # Both hf_repo_id and tar_path may live in one yaml; source selects one.
+        if source == "hf":
+            if hf_repo_id is None:
+                raise ValueError("olmoearth.source='hf' requires hf_repo_id")
+            self.tar_files = self._list_hf_tars(hf_repo_id, hf_folder, hf_token)
+            if not self.tar_files:
+                raise FileNotFoundError(
+                    f"No .tar shards in HF repo {hf_repo_id!r} folder={hf_folder!r}"
+                )
+        elif source == "local":
+            if tar_path is None:
+                raise ValueError("olmoearth.source='local' requires tar_path")
+            if isinstance(tar_path, (list, tuple)):
+                self.tar_files = list(tar_path)
+            elif "*" in str(tar_path) or "?" in str(tar_path):
+                self.tar_files = sorted(_glob.glob(str(tar_path)))
+            else:
+                self.tar_files = [str(tar_path)]
+            if not self.tar_files:
+                raise FileNotFoundError(f"No TAR files found: {tar_path}")
 
         self.n_bands_per_timestep = n_bands_per_timestep
         self.band_indices = list(band_indices) if band_indices is not None else list(range(n_bands_per_timestep))
         self.n_out_bands  = len(self.band_indices)
         self.crop_size    = crop_size
         self.random_flip  = random_flip
+        self.norm         = norm.lower()
         self.normalize    = normalize
         self.dn_scale     = dn_scale
+        self.sar_db_range = tuple(sar_db_range)
         self.max_missing_frac = max_missing_frac
         self.shuffle_buffer   = shuffle_buffer
         self.seed             = seed
         self.tif_key          = tif_key
         self.repeat           = repeat
+        if self.norm not in {"reflectance", "sar_db", "none"}:
+            raise ValueError(f"Unknown OLMoEarth norm={norm!r}; use reflectance, sar_db, or none")
+        if self.norm == "sar_db" and len(self.sar_db_range) != 2:
+            raise ValueError("sar_db_range must be a (min_db, max_db) pair")
 
         if self.n_out_bands in _NORM_STATS:
             self.s2_mean, self.s2_std = _NORM_STATS[self.n_out_bands]
@@ -125,6 +185,31 @@ class OLMoEarthDataset(IterableDataset):
             m, s = _NORM_STATS[4]
             idx = torch.arange(self.n_out_bands) % 4
             self.s2_mean, self.s2_std = m[idx], s[idx]
+
+    # ── HuggingFace shard discovery ──────────────────────────────────────────
+
+    @staticmethod
+    def _list_hf_tars(repo_id: str, folder: str = "", token: str | None = None) -> list[str]:
+        """List .tar shard URLs from a HuggingFace dataset for webdataset streaming.
+
+        Returns HTTPS URLs that webdataset opens directly — no local download.
+        For private datasets, set token (HF access token with read scope).
+        """
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        files = api.list_repo_files(repo_id, repo_type="dataset")
+        if folder:
+            prefix = folder.rstrip("/") + "/"
+            files = [f for f in files if f.startswith(prefix)]
+        files = sorted(f for f in files if f.endswith(".tar"))
+        base = f"https://huggingface.co/datasets/{repo_id}/resolve/main"
+        if token:
+            # pipe:curl injects auth header; token kept in HF_TOKEN env var
+            return [
+                f'pipe:curl -L -s -H "Authorization: Bearer $HF_TOKEN" "{base}/{f}"'
+                for f in files
+            ]
+        return [f"{base}/{f}" for f in files]
 
     # ── streaming iterator ───────────────────────────────────────────────────
 
@@ -187,10 +272,14 @@ class OLMoEarthDataset(IterableDataset):
             return None
         arr[missing_mask] = 0.0
 
-        # ── DN → reflectance ──────────────────────────────────────────────
-        if self.dn_scale != 1.0:
-            arr = arr / self.dn_scale
-        arr = np.clip(arr, 0.0, 1.0)
+        # ── modality-specific value scaling ──────────────────────────────
+        if self.norm == "reflectance":
+            if self.dn_scale != 1.0:
+                arr = arr / self.dn_scale
+            arr = np.clip(arr, 0.0, 1.0)
+        elif self.norm == "sar_db":
+            lo, hi = self.sar_db_range
+            arr = np.clip(arr, lo, hi)
 
         # ── random spatial crop ───────────────────────────────────────────
         if H < self.crop_size or W < self.crop_size:
@@ -208,11 +297,17 @@ class OLMoEarthDataset(IterableDataset):
         arr = arr.transpose(1, 0, 2, 3).copy()
         buffer = torch.from_numpy(arr)
 
-        # ── per-band z-score normalization ────────────────────────────────
+        # ── final normalization ───────────────────────────────────────────
         if self.normalize:
-            mean = self.s2_mean.view(self.n_out_bands, 1, 1, 1)
-            std  = self.s2_std.view(self.n_out_bands, 1, 1, 1)
-            buffer = (buffer - mean) / std
+            if self.norm == "reflectance":
+                mean = self.s2_mean.view(self.n_out_bands, 1, 1, 1)
+                std  = self.s2_std.view(self.n_out_bands, 1, 1, 1)
+                buffer = (buffer - mean) / std
+            elif self.norm == "sar_db":
+                lo, hi = self.sar_db_range
+                center = 0.5 * (lo + hi)
+                scale = max((hi - lo) / 4.0, 1e-6)
+                buffer = (buffer - center) / scale
 
         # clip_indices must be last: MaskCollator detects fpc via len(sample[-1][-1])
         return [buffer], 0, _DOY_TENSOR.clone(), [_CLIP_INDICES[0].copy()]

@@ -35,14 +35,14 @@ Usage:
     # AWF — 2-stage fine-tuning (10 frozen + 30 unfrozen epochs)
     python segmentation.py \\
         --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \\
-        --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_final.pth \\
-        --dataset awf --data_dir /home/baai/vjepa2/data
+        --checkpoint /workspace/checkpoints/run03/checkpoint_final.pth \\
+        --dataset awf --data_dir /workspace/data
 
     # EuroSAT — quick test with existing data
     python segmentation.py \\
         --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \\
-        --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_final.pth \\
-        --dataset eurosat --data_dir /home/baai/vjepa2/data
+        --checkpoint /workspace/checkpoints/run03/checkpoint_final.pth \\
+        --dataset eurosat --data_dir /workspace/data
 """
 
 import argparse

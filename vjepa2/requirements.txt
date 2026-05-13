@@ -9,6 +9,7 @@ opencv-python
 submitit
 braceexpand
 webdataset
+huggingface_hub
 timm
 transformers
 peft

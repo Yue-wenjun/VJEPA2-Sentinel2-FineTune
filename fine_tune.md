@@ -68,7 +68,7 @@ V-JEPA 原设计针对连续视频（~24fps）。OLMo-Earth 提供固定 12 帧�
 ```yaml
 meta:
   load_checkpoint: true
-  read_checkpoint: /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth
+  read_checkpoint: /workspace/checkpoints/run01/checkpoint_ep0005.pth
 ```
 
 ### 多次训练不覆盖（run_tag）
@@ -76,15 +76,15 @@ meta:
 每次新训练改一行，checkpoint 自动存入独立子目录：
 
 ```yaml
-folder: /home/baai/vjepa2/checkpoints
+folder: /workspace/checkpoints
 run_tag: run02   # → 存到 checkpoints/run02/
 ```
 
 | run_tag | checkpoint 目录 |
 |---|---|
-| run01 | `/home/baai/vjepa2/checkpoints/run01/` |
-| run02 | `/home/baai/vjepa2/checkpoints/run02/` |
-| （不填） | `/home/baai/vjepa2/checkpoints/`（原行为） |
+| run01 | `/workspace/checkpoints/run01/` |
+| run02 | `/workspace/checkpoints/run02/` |
+| （不填） | `/workspace/checkpoints/`（原行为） |
 
 ---
 
@@ -277,7 +277,7 @@ inspect_sample("/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar")
 ## 实验记录
 
 > 评估方式：frozen encoder + sklearn LogisticRegression，EuroSAT-MS 10类分类，test split 4050样本。
-> checkpoint：`/home/baai/vjepa2/checkpoints/<run_tag>/checkpoint_final.pth`（或指定 epoch）。
+> checkpoint：`/workspace/checkpoints/<run_tag>/checkpoint_final.pth`（或指定 epoch）。
 
 ### 对比汇总（EuroSAT-MS Linear Probe）
 
@@ -295,7 +295,7 @@ inspect_sample("/your_data/olmoearth/10_sentinel2_l2a_monthly/*.tar")
 
 ### A — 预训练原始权重（无微调，2026-05-02）
 
-checkpoint：`/home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt`（`--run_tag pretrained`）
+checkpoint：`/workspace/vjepa2_1_vitl_dist_vitG_384.pt`（`--run_tag pretrained`）
 
 patch_embed 4ch 随机初始化（原始权重为 3ch，形状不匹配跳过），backbone transformer blocks 完整加载。
 

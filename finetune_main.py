@@ -547,16 +547,26 @@ def main():
 
     # ── dataset + collator ────────────────────────────────────────────────────
     dataset = OLMoEarthDataset(
-        tar_path=oe_cfg["tar_path"],
+        source=oe_cfg.get("source", "auto"),
+        tar_path=oe_cfg.get("tar_path"),
+        hf_repo_id=oe_cfg.get("hf_repo_id"),
+        hf_folder=oe_cfg.get("hf_folder", ""),
+        hf_token=oe_cfg.get("hf_token") or os.environ.get("HF_TOKEN"),
         n_bands_per_timestep=oe_cfg.get("n_bands_per_timestep", 4),
         crop_size=d_cfg["crop_size"],
+        norm=oe_cfg.get("norm", "reflectance"),
         dn_scale=oe_cfg.get("dn_scale", 10000.0),
+        sar_db_range=tuple(oe_cfg.get("sar_db_range", [-30.0, 5.0])),
         max_missing_frac=oe_cfg.get("max_missing_frac", 0.10),
         shuffle_buffer=oe_cfg.get("shuffle_buffer", 1000),
         seed=cfg["meta"].get("seed", 42),
         repeat=is_ddp,   # cycle shards in DDP so all ranks reach max_steps together
     )
-    log.info(f"Dataset: OLMoEarthDataset — {len(dataset.tar_files)} TAR shards")
+    source = oe_cfg.get("source", "auto")
+    if source == "auto":
+        source = "hf" if oe_cfg.get("hf_repo_id") else "local"
+    source_desc = ("hf://" + oe_cfg["hf_repo_id"]) if source == "hf" else oe_cfg.get("tar_path")
+    log.info(f"Dataset: OLMoEarthDataset — {len(dataset.tar_files)} shards from {source_desc}")
 
     mask_collator = MaskCollator(
         cfgs_mask=cfg["mask"],

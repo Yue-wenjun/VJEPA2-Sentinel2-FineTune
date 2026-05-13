@@ -4,28 +4,58 @@ app: vjepa_2_1_olmoearth
 nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
-folder: /home/baai/vjepa2/checkpoints
+folder: /workspace/checkpoints
 run_tag: run01          # change to run02, run03 … each new training run
 
-# ── OLMo-Earth data (local TAR files) ────────────────────────────────────────
+# ── OLMo-Earth data ──────────────────────────────────────────────────────────
+# Two source modes. Keep both paths in the file if useful, and switch source:
+#   source: hf     # RunPod / cloud: stream directly from HuggingFace
+#   source: local  # AutoDL / local server: read downloaded TAR files
 olmoearth:
-  # Glob pattern pointing to your locally downloaded TAR shards.
-  # Download: https://hf-mirror.com/datasets/allenai/olmoearth_pretrain_dataset/tree/main/10_sentinel2_l2a_monthly
-  tar_path: "/home/baai/mnt/*.tar"
+  source: hf
+
+  # ── Mode A: HuggingFace streaming (recommended for RunPod / no local storage)
+  # webdataset reads .tar shards directly over HTTPS, no preliminary download.
+  # First-epoch network throughput is ~100-300 MB/s on US RunPod nodes;
+  # tune num_workers=8 in finetune_main.py if GPU is starved.
+  #
+  # Available folders in this repo (same spatial grid, same time alignment):
+  #   10_sentinel2_l2a_monthly  — S2 optical @ 10m, 4 bands (B02/B03/B04/B08)
+  #   20_sentinel2_l2a_monthly  — S2 optical @ 20m, 6 bands
+  #   40_sentinel2_l2a_monthly  — S2 optical @ 40m, 2 bands
+  #   10_sentinel1_monthly      — S1 SAR, 2 bands (VV, VH)        ← Stage 2 SAR
+  #   10_landsat_monthly        — Landsat 8/9
+  #   10_cdl / 10_worldcover / 10_worldcereal — categorical labels
+  #   10_srtm / 10_wri_canopy_height_map      — single-frame continuous
+  #   10_era5_10_monthly        — ERA5 climate reanalysis
+  #   10_openstreetmap_raster   — OSM rasterized
+  hf_repo_id: "allenai/olmoearth_pretrain_dataset"
+  hf_folder: "10_sentinel2_l2a_monthly"
+  # hf_token: "${HF_TOKEN}"   # only needed for private datasets
+
+  # ── Mode B: Local TAR files (AutoDL / offline fallback)
+  tar_path: "/workspace/data/olmoearth/*.tar"
 
   # 10_sentinel2_l2a_monthly = 10 m bands only: B02 B03 B04 B08
   # → 4 bands × 12 months = 48 channels per GeoTIFF.
-  # NOTE: B11/B12 (SWIR) live in 20_sentinel2_l2a_monthly (not downloaded yet).
-  #       Download that folder and set n_bands_per_timestep=12 to enable 6-band mode.
+  # NOTE: B11/B12 (SWIR) live in 20_sentinel2_l2a_monthly.
+  #       Switch hf_folder and set n_bands_per_timestep=12 to enable 6-band mode.
+  # SAR-only smoke test:
+  #   hf_folder: "10_sentinel1_monthly"
+  #   n_bands_per_timestep: 2
+  #   norm: "sar_db"
+  #   dn_scale: 1.0
   n_bands_per_timestep: 4
 
   # Raw pixel scale: 10000.0 if GeoTIFF stores DN (0-10000), 1.0 if reflectance.
   # Run: python -c "from data_pipeline.olmoearth_dataset import inspect_sample; inspect_sample('<tar_path>')"
+  norm: "reflectance"          # reflectance | sar_db | none
   dn_scale: 10000.0
+  sar_db_range: [-30.0, 5.0]   # used only when norm: sar_db
   max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
   shuffle_buffer: 500           # keep small — large buffer stalls worker startup
 
-pretrained_checkpoint: /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
+pretrained_checkpoint: /workspace/vjepa2_1_vitl_dist_vitG_384.pt
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 data:
@@ -161,6 +191,6 @@ meta:
   dtype: bfloat16
   seed: 42
   save_every_freq: 1
-  load_checkpoint: true
-  read_checkpoint: /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth
+  load_checkpoint: false
+  read_checkpoint:
   use_sdpa: true

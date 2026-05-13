@@ -12,10 +12,10 @@ Outputs (in --output_dir):
 Usage:
     python visualize.py \\
         --config  vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \\
-        --checkpoint /home/baai/vjepa2/checkpoints/checkpoint_final.pth \\
-        [--pretrained  /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt] \\
+        --checkpoint /workspace/checkpoints/checkpoint_final.pth \\
+        [--pretrained  /workspace/vjepa2_1_vitl_dist_vitG_384.pt] \\
         [--n_samples   6] \\
-        [--output_dir  /home/baai/vjepa2/vis]
+        [--output_dir  /workspace/vis]
 """
 
 import argparse

@@ -32,7 +32,7 @@ Edit the yaml:
 ```yaml
 meta:
   load_checkpoint: true
-  read_checkpoint: /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth
+  read_checkpoint: /workspace/checkpoints/run01/checkpoint_ep0005.pth
 ```
 Then rerun the same `torchrun` command.
 
@@ -89,13 +89,13 @@ Record each run in `../week2文档/ablation.md`: config path, code commit/tag, c
 ## M0 Diagnostics
 
 `diagnostics_m0.py` runs the lightweight Stage 0 checks from the PFU checklist:
-effective rank / covariance spectrum, random vs Prithvi vs hand-crafted RGB adapter comparison, and a small EuroSAT linear probe.
+effective rank / covariance spectrum, five adapter initializations, and a small EuroSAT linear probe.
 
 ```bash
 python diagnostics_m0.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \
-    --data_dir /home/baai/vjepa2/data \
+    --checkpoint ../model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \
+    --data_dir /workspace/data \
     --output_dir m0_results \
     --max_samples 2000
 ```
@@ -109,6 +109,7 @@ Outputs:
 | `m0_results/m0_spectrum.png` | covariance spectrum overlay |
 | `m0_results/m0_scatter.png` | probe accuracy vs rank |
 
+Default configs are `random rgb_mean_copy prithvi hand_rgb spectral`.
 Use `--configs random prithvi hand_rgb` to choose a subset, and `--tokens_per_sample` to control covariance memory.
 
 ---
@@ -128,7 +129,7 @@ python visualize.py \
 # + before/after comparison with original pretrained weights
 python visualize.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --pretrained /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
+    --pretrained /workspace/vjepa2_1_vitl_dist_vitG_384.pt
 
 # Different run (without editing yaml)
 python visualize.py \
@@ -138,8 +139,8 @@ python visualize.py \
 # Specific checkpoint (e.g. intermediate epoch)
 python visualize.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run01/checkpoint_ep0005.pth \
-    --output_dir /home/baai/vjepa2/vis/run01_ep5
+    --checkpoint /workspace/checkpoints/run01/checkpoint_ep0005.pth \
+    --output_dir /workspace/vis/run01_ep5
 ```
 
 ---
@@ -164,7 +165,7 @@ for region in ['frh01', 'frh02', 'frh03', 'frh04']:
 print('Done')
 "
 
-mv ~/vjepa2/breizhcrops/ /home/baai/vjepa2/data/breizhcrops/
+mv ~/vjepa2/breizhcrops/ /workspace/data/breizhcrops/
 ```
 
 ```bash
@@ -175,43 +176,43 @@ pip install rasterio breizhcrops scikit-learn
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --dataset both \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # EuroSAT only — specific checkpoint
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset eurosat \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # BreizhCrops only — specific checkpoint
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset breizhcrops \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # Different run (without editing yaml)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
     --run_tag run02 \
     --dataset both \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # Pretrained baseline (before fine-tuning, for comparison)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt \
+    --checkpoint /workspace/vjepa2_1_vitl_dist_vitG_384.pt \
     --run_tag pretrained \
     --dataset eurosat \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # Re-extract features (ignore .npz cache)
 python linear_probe.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset both \
-    --data_dir /home/baai/vjepa2/data \
+    --data_dir /workspace/data \
     --no_cache
 ```
 
@@ -220,9 +221,9 @@ Features are cached as `.npz` under `<checkpoint_folder>/<run_tag>/probe_results
 ### Pooling / PCA Ablation
 
 ```bash
-CKPT=/home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth
+CKPT=/workspace/checkpoints/run03/checkpoint_ep0000.pth
 CFG=vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml
-DATA=/home/baai/vjepa2/data
+DATA=/workspace/data
 
 # global mean-pool 1024-dim (baseline)
 python linear_probe.py --config $CFG --checkpoint $CKPT --dataset eurosat --data_dir $DATA
@@ -270,31 +271,31 @@ cp ./awf_raw/annotation_features.geojson ./data/awf/
 # AWF — 完整 2-stage 训练（10 frozen + 30 unfrozen epochs）
 python segmentation.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset awf \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # AWF — 训练前先跑 kNN baseline（评估 encoder 特征质量，k=20 cosine）
 python segmentation.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset awf \
-    --data_dir /home/baai/vjepa2/data \
+    --data_dir /workspace/data \
     --eval_knn
 
 # EuroSAT — 用已有数据快速验证 decoder 架构
 python segmentation.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset eurosat \
-    --data_dir /home/baai/vjepa2/data
+    --data_dir /workspace/data
 
 # 自定义 epoch / LR
 python segmentation.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset awf \
-    --data_dir /home/baai/vjepa2/data \
+    --data_dir /workspace/data \
     --freeze_epochs 10 \
     --unfreeze_epochs 30 \
     --lr 1e-4 \
@@ -303,9 +304,9 @@ python segmentation.py \
 # 仅 stage 1（decoder-only，快速基线）
 python segmentation.py \
     --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint /home/baai/vjepa2/checkpoints/run03/checkpoint_ep0000.pth \
+    --checkpoint /workspace/checkpoints/run03/checkpoint_ep0000.pth \
     --dataset awf \
-    --data_dir /home/baai/vjepa2/data \
+    --data_dir /workspace/data \
     --freeze_epochs 10 \
     --unfreeze_epochs 0
 ```
