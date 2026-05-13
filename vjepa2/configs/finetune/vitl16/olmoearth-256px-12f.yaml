@@ -4,7 +4,7 @@ app: vjepa_2_1_olmoearth
 nodes: 1
 tasks_per_node: 1            # set to number of GPUs available
 cpus_per_task: 4
-folder: /workspace/checkpoints
+folder: /root/autodl-tmp/checkpoints   # AutoDL pod 训练输出目录;Mac 本地 debug 时可改为 ./checkpoints
 run_tag: run01          # change to run02, run03 … each new training run
 
 # ── OLMo-Earth data ──────────────────────────────────────────────────────────
@@ -34,7 +34,8 @@ olmoearth:
   # hf_token: "${HF_TOKEN}"   # only needed for private datasets
 
   # ── Mode B: Local TAR files (AutoDL / offline fallback)
-  tar_path: "/workspace/data/olmoearth/*.tar"
+  # AutoDL 实际路径:hfd 下载到 /root/autodl-tmp/staging/<folder>/<shard>.tar
+  tar_path: "/root/autodl-tmp/staging/10_sentinel2_l2a_monthly/*.tar"
 
   # 10_sentinel2_l2a_monthly = 10 m bands only: B02 B03 B04 B08
   # → 4 bands × 12 months = 48 channels per GeoTIFF.
@@ -55,7 +56,8 @@ olmoearth:
   max_missing_frac: 0.10     # skip sample if > 10% pixels are MISSING (-99999)
   shuffle_buffer: 500           # keep small — large buffer stalls worker startup
 
-pretrained_checkpoint: /workspace/vjepa2_1_vitl_dist_vitG_384.pt
+pretrained_checkpoint: /root/autodl-tmp/model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt
+# Mac 本地 debug(从 code/VJEPA2.1FineTune/ 启动): ../../model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 data:

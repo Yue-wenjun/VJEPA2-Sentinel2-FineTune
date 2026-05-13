@@ -88,26 +88,36 @@ Record each run in `../week2文档/ablation.md`: config path, code commit/tag, c
 
 ## M0 Diagnostics
 
-`diagnostics_m0.py` runs the lightweight Stage 0 checks from the PFU checklist:
-effective rank / covariance spectrum, five adapter initializations, and a small EuroSAT linear probe.
+**已迁移到 [code/PFU_Experiments/m0_cross_backbone.py](../PFU_Experiments/m0_cross_backbone.py)**(2026-05-14)。
+原 `diagnostics_m0.py` 的 5 个 V-JEPA adapter builder 已 inline 到
+`code/PFU_Experiments/backbones/vjepa.py`,并被多 backbone 通用脚本调用。
+
+V-JEPA 5-adapter sweep:
 
 ```bash
-python diagnostics_m0.py \
-    --config vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml \
-    --checkpoint ../model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \
-    --data_dir /workspace/data \
-    --output_dir m0_results \
+# 从 code/PFU_Experiments/ 启动
+cd ../PFU_Experiments
+
+# Mac local
+python m0_cross_backbone.py --backbone vjepa --vjepa_sweep \
+    --vjepa_weights ../../model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \
+    --data_dir ../../data \
+    --output_dir ../../results/m0_cross/ \
     --max_samples 2000
+
+# AutoDL
+python m0_cross_backbone.py --backbone vjepa --vjepa_sweep \
+    --vjepa_weights /root/autodl-tmp/model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \
+    --data_dir /root/autodl-tmp/data \
+    --output_dir /root/autodl-tmp/results/m0_cross/
 ```
 
 Outputs:
 
 | File | Content |
 |------|---------|
-| `m0_results/m0_results.json` | metrics and spectra for scripts |
-| `m0_results/m0_summary.md` | readable summary table |
-| `m0_results/m0_spectrum.png` | covariance spectrum overlay |
-| `m0_results/m0_scatter.png` | probe accuracy vs rank |
+| `results/m0_cross/m0_cross_results.json` | metrics + spectra, per backbone:init |
+| `results/m0_cross/cov_<backbone>.npz` | covariance matrices for cross-ε computation |
 
 Default configs are `random rgb_mean_copy prithvi hand_rgb spectral`.
 Use `--configs random prithvi hand_rgb` to choose a subset, and `--tokens_per_sample` to control covariance memory.
@@ -334,9 +344,9 @@ All scripts resolve the checkpoint path the same way:
 | File | Purpose |
 |------|---------|
 | `finetune_main.py` | Training entry point (3-stage freeze/unfreeze, EMA, JEPA loss) |
-| `diagnostics_m0.py` | M0 effective-rank / covariance / adapter diagnostics |
 | `visualize.py` | PCA patch embedding figures (server, no display) |
 | `linear_probe.py` | Frozen linear probe on EuroSAT-MS + BreizhCrops |
 | `segmentation.py` | End-to-end segmentation fine-tuning (AWF / EuroSAT) |
+| (`diagnostics_m0.py` → moved to `code/PFU_Experiments/m0_cross_backbone.py` on 2026-05-14) |
 | `vjepa2/configs/finetune/vitl16/olmoearth-256px-12f.yaml` | Training config |
 | `fine_tune.md` | Detailed design notes (LLRD, best-of-stage restore, data pipeline) |
