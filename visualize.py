@@ -30,6 +30,8 @@ import torch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent / "vjepa2"))
+# OLMoEarthDataset 2026-05-18 移到 PFU_Experiments/data_pipeline/。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "PFU_Experiments"))
 
 import app.vjepa_2_1.models.vision_transformer as video_vit
 from app.vjepa_2_1.wrappers import MultiSeqWrapper

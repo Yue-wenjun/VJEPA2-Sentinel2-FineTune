@@ -27,6 +27,9 @@ import yaml
 from torch.nn.parallel import DistributedDataParallel
 
 sys.path.insert(0, str(Path(__file__).parent / "vjepa2"))
+# OLMoEarthDataset 2026-05-18 移到 PFU_Experiments/data_pipeline/(因为不是 JEPA 专有)。
+# patch_embed_6ch.py 留在本地(Conv3d, JEPA video 专用)。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "PFU_Experiments"))
 
 import app.vjepa_2_1.models.predictor as vit_pred
 import app.vjepa_2_1.models.vision_transformer as video_vit
