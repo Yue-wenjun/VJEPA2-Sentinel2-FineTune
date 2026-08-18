@@ -82,7 +82,7 @@ torchrun --nproc_per_node=8 finetune_main.py \
     2>&1 | tee logs/${RUN}.log
 ```
 
-Record each run in `../week2文档/ablation.md`: config path, code commit/tag, checkpoint path, linear probe command, and result.
+Record each run in `../week2doc/ablation.md`: config path, code commit/tag, checkpoint path, linear probe command, and result.
 
 ---
 
@@ -107,9 +107,9 @@ python m0_cross_backbone.py --backbone vjepa --vjepa_sweep \
 
 # AutoDL
 python m0_cross_backbone.py --backbone vjepa --vjepa_sweep \
-    --vjepa_weights /root/autodl-tmp/model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \
-    --data_dir /root/autodl-tmp/data \
-    --output_dir /root/autodl-tmp/results/m0_cross/
+    --vjepa_weights $PFU_ROOT/model_weights/vjepa2.1/vjepa2_1_vitl_dist_vitG_384.pt \
+    --data_dir $PFU_ROOT/data \
+    --output_dir $PFU_ROOT/results/m0_cross/
 ```
 
 Outputs:
